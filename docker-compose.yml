@@ -11,12 +11,6 @@ services:
     volumes:
       - meilisearch_data:/meili_data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
     # Not exposed externally — only reachable via the internal Docker network.
     # Uncomment the next two lines to expose MeiliSearch for debugging:
     # ports:
@@ -50,14 +44,8 @@ services:
     volumes:
       - api_cache:/data/cache
     depends_on:
-      meilisearch:
-        condition: service_healthy
+      - meilisearch
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
 
 volumes:
   meilisearch_data:
