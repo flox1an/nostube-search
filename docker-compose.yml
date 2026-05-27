@@ -28,9 +28,7 @@ services:
   # Full re-index uses a rolling swap (videos_next → videos) so the API stays
   # available throughout.
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/flox1an/nostube-search:latest
     container_name: nostube-api
     ports:
       - "${API_PORT:-3001}:3001"
