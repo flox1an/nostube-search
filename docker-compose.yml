@@ -41,6 +41,7 @@ services:
       INDEXER_STATE_PATH: /data/cache/.indexer-state.json
       INDEXER_INCREMENTAL_INTERVAL_MS: ${INDEXER_INCREMENTAL_INTERVAL_MS:-600000}
       INDEXER_FULL_INTERVAL_MS: ${INDEXER_FULL_INTERVAL_MS:-86400000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
     volumes:
       - api_cache:/data/cache
     depends_on:

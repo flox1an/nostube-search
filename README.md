@@ -42,14 +42,65 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 | `GET` | `/health` | API + MeiliSearch health check |
 | `GET` | `/` | Built-in search UI |
 
-**Search parameters:**
+**Search parameters (`/api/search`):**
 
 | Param | Default | Description |
 |-------|---------|-------------|
 | `q` | — | Search query (required) |
-| `limit` | `20` | Results per page |
+| `limit` | `20` | Results per page (non-negative integer) |
 | `offset` | `0` | Pagination offset |
-| `sort` | — | `rankingScore:desc`, `rankingScore:asc`, `created_at:desc`, `created_at:asc` |
+| `sort` | — | One of: `rankingScore:desc`, `rankingScore:asc`, `created_at:desc`, `created_at:asc` |
+
+**Response shape (`/api/search`):**
+
+```json
+{
+  "hits": [
+    {
+      "event_id": "abc123...",
+      "title": "My Video",
+      "content_preview": "First 200 chars of summary or content",
+      "pubkey": "npub1...",
+      "kind": 34235,
+      "created_at": 1710000000,
+      "thumbnail": "https://example.com/thumb.jpg",
+      "videoUrl": "https://example.com/video.mp4",
+      "tags": ["bitcoin", "nostr"],
+      "authorDisplayName": "Alice",
+      "rankingScore": 0.987,
+      "nostrUrl": "https://nostu.be/v/naddr1..."
+    }
+  ],
+  "total": 42,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`nostrUrl` points to `https://nostu.be/v/<nevent|naddr>` for horizontal video (kinds 21, 34235) or `https://nostu.be/short/<nevent|naddr>` for short-form (kinds 22, 34236). Parameterized replaceable events (kinds 34235, 34236) use `naddr` encoding; regular events use `nevent`.
+
+**Response shape (`/api/search/suggest`):**
+
+```json
+{ "suggestions": ["Bitcoin and Lightning", "Bitcoin Basics", "..."] }
+```
+
+Up to 5 distinct non-empty titles matching `q`.
+
+**Response shape (`/api/search/completion`):**
+
+```json
+{ "completions": ["bitcoin", "blockchain", "..."] }
+```
+
+Up to 10 indexed words whose prefix matches the `prefix` parameter (minimum 1 character).
+
+**Error responses:**
+
+| Status | Body | Condition |
+|--------|------|-----------|
+| `400` | `{"error":"Missing query parameter q"}` | `q` is absent or blank on `/api/search` |
+| `502` | `{"error":"Search engine unavailable"}` | MeiliSearch unreachable or returned an error |
 
 ---
 
@@ -74,6 +125,7 @@ Copy `.env.example` to `.env` and adjust as needed.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `API_PORT` | `3001` | Host port the search API is published on. |
+| `CORS_ORIGIN` | _(empty)_ | Allowed CORS origin for `/api/*` routes (e.g. `https://nostub.be`). Leave empty to disable CORS headers. |
 
 ### MeiliSearch service
 

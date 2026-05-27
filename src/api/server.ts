@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -28,6 +29,10 @@ if (!meiliUrl || !meiliMasterKey) {
 }
 
 const app = new Hono()
+const corsOrigin = process.env.CORS_ORIGIN ?? ''
+if (corsOrigin) {
+  app.use('/api/*', cors({ origin: corsOrigin }))
+}
 const uiPath = resolve(process.cwd(), 'src/api/public/index.html')
 const ALLOWED_SORTS = new Set([
   'rankingScore:desc',
