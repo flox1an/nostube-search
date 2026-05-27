@@ -31,4 +31,4 @@ ENV PORT=3001
 
 EXPOSE 3001
 
-CMD ["node", "dist/api/server.js"]
+CMD ["node", "dist/index.js"]

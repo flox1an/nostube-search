@@ -22,7 +22,11 @@ services:
     # ports:
     #   - "${MEILI_PORT:-7700}:7700"
 
-  # ── Search API ───────────────────────────────────────────────────────────────
+  # ── API + Indexer ─────────────────────────────────────────────────────────────
+  # Runs the API server and the background indexer in a single process.
+  # Incremental update every 10 min, full re-index every 24 h.
+  # Full re-index uses a rolling swap (videos_next → videos) so the API stays
+  # available throughout.
   api:
     build:
       context: .
@@ -32,30 +36,6 @@ services:
       - "${API_PORT:-3001}:3001"
     environment:
       PORT: 3001
-      MEILI_URL: http://meilisearch:7700
-      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
-    volumes:
-      - ${DATA_PATH:-./data}/cache:/data/cache
-    depends_on:
-      meilisearch:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ── Indexer (persistent scheduler) ──────────────────────────────────────────
-  # Runs continuously: incremental update every 10 min, full re-index every 24 h.
-  # Full re-index uses a rolling swap (videos_next → videos) so the API stays
-  # available throughout.
-  indexer:
-    build:
-      context: .
-      dockerfile: Dockerfile.indexer
-    container_name: nostube-indexer
-    environment:
       MEILI_URL: http://meilisearch:7700
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
       NOSTR_SOURCE_RELAYS: ${NOSTR_SOURCE_RELAYS:-wss://relay.nostu.be}
@@ -75,3 +55,8 @@ services:
       meilisearch:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3

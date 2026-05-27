@@ -1,4 +1,4 @@
-name: Build and push Docker images
+name: Build and push Docker image
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nostube-search
 
 jobs:
   build:
@@ -16,14 +16,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-
-    strategy:
-      matrix:
-        include:
-          - name: nostube-search
-            dockerfile: Dockerfile
-          - name: nostube-search-indexer
-            dockerfile: Dockerfile.indexer
 
     steps:
       - name: Checkout
@@ -41,7 +33,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.name }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=sha,prefix=sha-
@@ -54,7 +46,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
