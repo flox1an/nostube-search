@@ -12,7 +12,7 @@ services:
       - meilisearch_data:/meili_data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
       interval: 10s
       timeout: 5s
       retries: 5
