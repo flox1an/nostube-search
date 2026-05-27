@@ -1,0 +1,77 @@
+services:
+
+  # ── MeiliSearch ──────────────────────────────────────────────────────────────
+  meilisearch:
+    image: getmeili/meilisearch:v1.19
+    container_name: nostube-meilisearch
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      MEILI_ENV: ${MEILI_ENV:-production}
+      MEILI_DB_PATH: /meili_data/data.ms
+    volumes:
+      - ${DATA_PATH:-./data}/meilisearch:/meili_data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Not exposed externally — only reachable via the internal Docker network.
+    # Uncomment the next two lines to expose MeiliSearch for debugging:
+    # ports:
+    #   - "${MEILI_PORT:-7700}:7700"
+
+  # ── Search API ───────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nostube-api
+    ports:
+      - "${API_PORT:-3001}:3001"
+    environment:
+      PORT: 3001
+      MEILI_URL: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+    volumes:
+      - ${DATA_PATH:-./data}/cache:/data/cache
+    depends_on:
+      meilisearch:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ── Indexer (persistent scheduler) ──────────────────────────────────────────
+  # Runs continuously: incremental update every 10 min, full re-index every 24 h.
+  # Full re-index uses a rolling swap (videos_next → videos) so the API stays
+  # available throughout.
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile.indexer
+    container_name: nostube-indexer
+    environment:
+      MEILI_URL: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      NOSTR_SOURCE_RELAYS: ${NOSTR_SOURCE_RELAYS:-wss://relay.nostu.be}
+      NOSTR_INDEX_RELAYS: ${NOSTR_INDEX_RELAYS:-wss://relay.nostu.be}
+      NOSTR_SOURCE_MAX_WAIT_MS: ${NOSTR_SOURCE_MAX_WAIT_MS:-30000}
+      FETCH_TRUST_SCORES: ${FETCH_TRUST_SCORES:-true}
+      PROFILE_CACHE_PATH: /data/cache/.profile-cache.json
+      PROFILE_CACHE_TTL_MS: ${PROFILE_CACHE_TTL_MS:-86400000}
+      TRUST_CACHE_PATH: /data/cache/.trust-cache.json
+      TRUST_CACHE_TTL_MS: ${TRUST_CACHE_TTL_MS:-86400000}
+      INDEXER_STATE_PATH: /data/cache/.indexer-state.json
+      INDEXER_INCREMENTAL_INTERVAL_MS: ${INDEXER_INCREMENTAL_INTERVAL_MS:-600000}
+      INDEXER_FULL_INTERVAL_MS: ${INDEXER_FULL_INTERVAL_MS:-86400000}
+    volumes:
+      - ${DATA_PATH:-./data}/cache:/data/cache
+    depends_on:
+      meilisearch:
+        condition: service_healthy
+    restart: unless-stopped

@@ -1,0 +1,10 @@
+node_modules/
+.env
+dist/
+data/
+
+# Trust score cache (auto-generated)
+.trust-cache.json
+
+# Profile cache (auto-generated)
+.profile-cache.json
