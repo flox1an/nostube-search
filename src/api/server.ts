@@ -9,14 +9,42 @@ type SearchHit = {
   event_id?: string
   title?: string
   summary?: string
+  content_preview?: string
   content?: string | null
   pubkey?: string
+  npub?: string
   kind?: number
   created_at?: number
+  published_at?: number | null
+  effectivePublishedAt?: number
+  duration?: number | null
   thumbnail?: string | null
+  thumbnailBlurhash?: string | null
   tags?: string[]
   d_tag?: string | null
+  identifier?: string | null
   videoUrl?: string | null
+  mimeType?: string | null
+  mediaType?: 'video' | 'audio' | null
+  dimensions?: string | null
+  height?: number | null
+  isHd?: boolean
+  isShort?: boolean
+  isVideo?: boolean
+  isNostrNative?: boolean
+  size?: number | null
+  hash?: string | null
+  fallbackUrls?: string[]
+  contentWarning?: string | null
+  textTracks?: Array<{ url?: string; lang?: string | null }>
+  hasCaptions?: boolean
+  origins?: Array<{
+    platform?: string | null
+    externalId?: string | null
+    originalUrl?: string | null
+    metadata?: Record<string, string>
+  }>
+  nostrUrl?: string
   rankingScore?: number
   authorDisplayName?: string | null
 }
@@ -29,16 +57,43 @@ if (!meiliUrl || !meiliMasterKey) {
 }
 
 const app = new Hono()
-const corsOrigin = process.env.CORS_ORIGIN ?? ''
+const corsOrigin = process.env.CORS_ORIGIN?.replace(/^['"]|['"]$/g, '') ?? ''
 if (corsOrigin) {
-  app.use('/api/*', cors({ origin: corsOrigin }))
+  app.use('/api/*', cors({ origin: corsOrigin === '*' ? '*' : corsOrigin }))
 }
 const uiPath = resolve(process.cwd(), 'src/api/public/index.html')
-const ALLOWED_SORTS = new Set([
+const ALLOWED_RAW_SORTS = new Set([
   'rankingScore:desc',
   'rankingScore:asc',
   'created_at:desc',
   'created_at:asc',
+  'published_at:desc',
+  'published_at:asc',
+  'effectivePublishedAt:desc',
+  'effectivePublishedAt:asc',
+  'duration:desc',
+  'duration:asc',
+])
+const SORT_ALIASES = new Map([
+  ['relevance', undefined],
+  ['newest', 'effectivePublishedAt:desc'],
+  ['oldest', 'effectivePublishedAt:asc'],
+  ['duration', 'duration:desc'],
+])
+const TYPE_FILTERS = new Map([
+  ['videos', 'isVideo = true'],
+  ['shorts', 'isShort = true'],
+  ['audio', 'mediaType = "audio"'],
+])
+const DURATION_FILTERS = new Map([
+  ['short', 'duration < 180'],
+  ['medium', 'duration >= 180 AND duration <= 1200'],
+  ['long', 'duration > 1200'],
+])
+const FEATURE_FILTERS = new Map([
+  ['captions', 'hasCaptions = true'],
+  ['hd', 'isHd = true'],
+  ['nostr', 'isNostrNative = true'],
 ])
 
 function toInt(input: string | undefined, fallback: number): number {
@@ -47,13 +102,67 @@ function toInt(input: string | undefined, fallback: number): number {
 }
 
 function contentPreview(hit: SearchHit): string {
-  const source = hit.summary ?? hit.content ?? ''
+  const source = hit.content_preview ?? hit.summary ?? hit.content ?? ''
   return source.slice(0, 200)
 }
 
 function parseSort(input: string | undefined): string | undefined {
   if (!input) return undefined
-  return ALLOWED_SORTS.has(input) ? input : undefined
+  if (SORT_ALIASES.has(input)) return SORT_ALIASES.get(input)
+  return ALLOWED_RAW_SORTS.has(input) ? input : undefined
+}
+
+function unixNowSeconds(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
+function parseDateFilter(input: string | undefined): string | undefined {
+  if (!input || input === 'any') return undefined
+  const now = unixNowSeconds()
+  const day = 86_400
+  const thresholds: Record<string, number> = {
+    today: now - day,
+    week: now - 7 * day,
+    month: now - 30 * day,
+    year: now - 365 * day,
+  }
+  const threshold = thresholds[input]
+  return threshold ? `effectivePublishedAt >= ${threshold}` : undefined
+}
+
+function parseSearchFilters(query: {
+  type?: string
+  duration?: string
+  date?: string
+  feature?: string | string[]
+}): string[] {
+  const filters: string[] = []
+
+  if (query.type && query.type !== 'all') {
+    const filter = TYPE_FILTERS.get(query.type)
+    if (filter) filters.push(filter)
+  }
+
+  if (query.duration && query.duration !== 'any') {
+    const filter = DURATION_FILTERS.get(query.duration)
+    if (filter) filters.push(filter)
+  }
+
+  const dateFilter = parseDateFilter(query.date)
+  if (dateFilter) filters.push(dateFilter)
+
+  const features = Array.isArray(query.feature)
+    ? query.feature.flatMap(feature => feature.split(','))
+    : typeof query.feature === 'string'
+      ? query.feature.split(',')
+      : []
+
+  for (const feature of features) {
+    const filter = FEATURE_FILTERS.get(feature.trim())
+    if (filter) filters.push(filter)
+  }
+
+  return filters
 }
 
 function generateNostubeUrl(hit: {
@@ -91,7 +200,7 @@ function mapHit(hit: SearchHit) {
   const kind = hit.kind ?? 0
 
   const nostrUrl = event_id && pubkey
-    ? generateNostubeUrl({ event_id, pubkey, kind, d_tag: hit.d_tag })
+    ? hit.nostrUrl ?? generateNostubeUrl({ event_id, pubkey, kind, d_tag: hit.d_tag ?? hit.identifier })
     : ''
 
   return {
@@ -99,18 +208,45 @@ function mapHit(hit: SearchHit) {
     title: hit.title ?? 'Untitled',
     content_preview: contentPreview(hit),
     pubkey,
+    npub: hit.npub ?? null,
     kind,
     created_at: hit.created_at ?? 0,
+    published_at: hit.published_at ?? null,
+    duration: hit.duration ?? null,
     thumbnail: hit.thumbnail ?? null,
+    thumbnailBlurhash: hit.thumbnailBlurhash ?? null,
     videoUrl: hit.videoUrl ?? null,
     tags: Array.isArray(hit.tags) ? hit.tags : [],
     authorDisplayName: hit.authorDisplayName ?? null,
     rankingScore: hit.rankingScore ?? 0,
     nostrUrl,
+    contentWarning: hit.contentWarning ?? null,
+    textTracks: Array.isArray(hit.textTracks)
+      ? hit.textTracks.map(track => ({ url: track.url ?? '', lang: track.lang ?? null })).filter(track => track.url)
+      : [],
+    hasCaptions: hit.hasCaptions ?? false,
+    dimensions: hit.dimensions ?? null,
+    height: hit.height ?? null,
+    isHd: hit.isHd ?? false,
+    isShort: hit.isShort ?? false,
+    isVideo: hit.isVideo ?? false,
+    isNostrNative: hit.isNostrNative ?? false,
+    mimeType: hit.mimeType ?? null,
+    mediaType: hit.mediaType ?? null,
+    size: hit.size ?? null,
+    hash: hit.hash ?? null,
+    fallbackUrls: Array.isArray(hit.fallbackUrls) ? hit.fallbackUrls : [],
+    origins: Array.isArray(hit.origins) ? hit.origins : [],
   }
 }
 
-async function meiliSearch(params: { q: string; limit: number; offset?: number; sort?: string[] }) {
+async function meiliSearch(params: {
+  q: string
+  limit: number
+  offset?: number
+  sort?: string[]
+  filter?: string[]
+}) {
   const res = await fetch(`${meiliUrl}/indexes/videos/search`, {
     method: 'POST',
     headers: {
@@ -138,9 +274,21 @@ app.get('/api/search', async c => {
   const limit = toInt(c.req.query('limit'), 20)
   const offset = toInt(c.req.query('offset'), 0)
   const sort = parseSort(c.req.query('sort'))
+  const filter = parseSearchFilters({
+    type: c.req.query('type'),
+    duration: c.req.query('duration'),
+    date: c.req.query('date'),
+    feature: c.req.queries('feature') ?? c.req.query('feature'),
+  })
 
   try {
-    const result = await meiliSearch({ q, limit, offset, ...(sort ? { sort: [sort] } : {}) })
+    const result = await meiliSearch({
+      q,
+      limit,
+      offset,
+      ...(sort ? { sort: [sort] } : {}),
+      ...(filter.length > 0 ? { filter } : {}),
+    })
     const hits = (result.hits ?? []).map(mapHit)
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
 

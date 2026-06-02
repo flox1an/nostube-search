@@ -49,7 +49,13 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 | `q` | — | Search query (required) |
 | `limit` | `20` | Results per page (non-negative integer) |
 | `offset` | `0` | Pagination offset |
-| `sort` | — | One of: `rankingScore:desc`, `rankingScore:asc`, `created_at:desc`, `created_at:asc` |
+| `type` | `all` | One of: `all`, `videos`, `shorts`, `audio` |
+| `duration` | `any` | One of: `any`, `short` (`<180s`), `medium` (`180s..1200s`), `long` (`>1200s`) |
+| `date` | `any` | One of: `any`, `today`, `week`, `month`, `year`; based on `published_at ?? created_at` |
+| `feature` | — | Repeatable or comma-separated. Values: `captions`, `hd`, `nostr` |
+| `sort` | `relevance` | One of: `relevance`, `newest`, `oldest`, `duration`; raw Meili sorts such as `rankingScore:desc`, `created_at:desc`, `effectivePublishedAt:desc`, `duration:desc` are also accepted |
+
+`sort=popularity` is intentionally not supported until the index has reliable popularity metrics such as views, likes/zaps, or replay data.
 
 **Response shape (`/api/search`):**
 
@@ -63,12 +69,19 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
       "pubkey": "npub1...",
       "kind": 34235,
       "created_at": 1710000000,
+      "published_at": 1710000000,
+      "duration": 420,
       "thumbnail": "https://example.com/thumb.jpg",
       "videoUrl": "https://example.com/video.mp4",
       "tags": ["bitcoin", "nostr"],
       "authorDisplayName": "Alice",
       "rankingScore": 0.987,
-      "nostrUrl": "https://nostu.be/v/naddr1..."
+      "nostrUrl": "https://nostu.be/v/naddr1...",
+      "contentWarning": null,
+      "textTracks": [{ "url": "https://example.com/captions.vtt", "lang": "en" }],
+      "dimensions": "1920x1080",
+      "mimeType": "video/mp4",
+      "mediaType": "video"
     }
   ],
   "total": 42,
@@ -78,6 +91,8 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 ```
 
 `nostrUrl` points to `https://nostu.be/v/<nevent|naddr>` for horizontal video (kinds 21, 34235) or `https://nostu.be/short/<nevent|naddr>` for short-form (kinds 22, 34236). Parameterized replaceable events (kinds 34235, 34236) use `naddr` encoding; regular events use `nevent`.
+
+The video index also stores filter-oriented metadata from Nostr tags and `imeta`, including `identifier`, `content_preview`, `duration`, `contentWarning`, `hasCaptions`, `isHd`, `isShort`, `isVideo`, `isNostrNative`, `thumbnailBlurhash`, `size`, `hash`, `fallbackUrls`, and `origins`. Existing documents need a full re-index before all newly indexed fields are populated.
 
 **Response shape (`/api/search/suggest`):**
 

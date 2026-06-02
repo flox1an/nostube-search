@@ -47,23 +47,78 @@ type VideoEventRow = {
 
 type EventUrlStats = { urlsTotal: number; urlsAvailable: number };
 
+type TextTrack = { url: string; lang: string | null };
+type Origin = {
+  platform: string | null;
+  externalId: string | null;
+  originalUrl: string | null;
+  metadata: Record<string, string>;
+};
+type ParsedImeta = {
+  videoUrl: string | null;
+  mimeType: string | null;
+  dimensions: string | null;
+  width: number | null;
+  height: number | null;
+  imageUrls: string[];
+  thumbnail: string | null;
+  size: number | null;
+  hash: string | null;
+  fallbackUrls: string[];
+  thumbnailBlurhash: string | null;
+  mediaType: 'video' | 'audio' | null;
+};
+
+type PlayableImeta = {
+  url: string;
+  mimeType: string;
+  mediaType: 'video' | 'audio';
+  dimensions: string | null;
+  width: number | null;
+  height: number | null;
+  thumbnail: string | null;
+  size: number | null;
+  hash: string | null;
+  thumbnailBlurhash: string | null;
+};
+
 type SearchDocument = {
   id: string;
   event_id: string;
   pubkey: string;
   npub: string;
   kind: number;
+  identifier: string | null;
   title: string;
   summary: string;
+  content_preview: string;
   content: string | null;
   created_at: number;
+  published_at: number | null;
+  effectivePublishedAt: number;
+  duration: number | null;
   tags: string[];
   thumbnail: string | null;
   candidateThumbnails: string[];
+  thumbnailBlurhash: string | null;
   videoUrl: string | null;
   mimeType: string | null;
+  mediaType: 'video' | 'audio' | null;
+  dimensions: string | null;
   width: number | null;
   height: number | null;
+  isHd: boolean;
+  isShort: boolean;
+  isVideo: boolean;
+  isNostrNative: boolean;
+  size: number | null;
+  hash: string | null;
+  fallbackUrls: string[];
+  contentWarning: string | null;
+  textTracks: TextTrack[];
+  hasCaptions: boolean;
+  origins: Origin[];
+  nostrUrl: string;
   d_tag: string | null;
   authorDisplayName: string | null;
   relatedEventsTotal: number;
@@ -134,24 +189,38 @@ function firstTagValue(tags: string[][], tagName: string): string | null {
   return tag?.[1] ?? null;
 }
 
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+function parseDimensions(dim: string | null): { dimensions: string | null; width: number | null; height: number | null } {
+  const match = dim?.match(/^(\d+)x(\d+)$/i);
+  if (!match) return { dimensions: null, width: null, height: null };
+  return { dimensions: `${match[1]}x${match[2]}`, width: Number(match[1]), height: Number(match[2]) };
+}
+
 function collectTopicTags(tags: string[][]): string[] {
   return tags
     .filter(entry => entry[0] === 't' && typeof entry[1] === 'string' && entry[1].trim().length > 0)
     .map(entry => entry[1]);
 }
 
-function parseImetaTags(tags: string[][]): {
-  videoUrl: string | null;
-  mimeType: string | null;
-  width: number | null;
-  height: number | null;
-  imageUrls: string[];
-} {
+function parseImetaTags(tags: string[][]): ParsedImeta {
   let videoUrl: string | null = null;
   let mimeType: string | null = null;
+  let dimensions: string | null = null;
   let width: number | null = null;
   let height: number | null = null;
+  let thumbnail: string | null = null;
+  let size: number | null = null;
+  let hash: string | null = null;
+  let thumbnailBlurhash: string | null = null;
+  let mediaType: 'video' | 'audio' | null = null;
   const imageUrls: string[] = [];
+  const fallbackUrls: string[] = [];
+  let firstAudio: PlayableImeta | null = null;
 
   for (const imeta of tags.filter(t => t[0] === 'imeta')) {
     const values = new Map<string, string>();
@@ -162,24 +231,155 @@ function parseImetaTags(tags: string[][]): {
         const value = imeta[i].slice(firstSpace + 1).trim();
         values.set(key, value);
         if (key === 'image' && value) imageUrls.push(value);
+        if ((key === 'fallback' || key === 'mirror') && value) fallbackUrls.push(value);
       }
     }
 
     const url = values.get('url');
     const m = values.get('m');
     const dim = values.get('dim');
+    const type = m?.startsWith('video/') ? 'video' : m?.startsWith('audio/') ? 'audio' : null;
 
-    if (m?.startsWith('video/') && url) {
-      videoUrl = url;
-      mimeType = m;
-      if (dim) {
-        const [w, h] = dim.split('x').map(Number);
-        if (w && h) { width = w; height = h; }
-      }
+    if (!type || !url || !m) continue;
+
+    const parsedDim = parseDimensions(dim ?? null);
+    const playable: PlayableImeta = {
+      url,
+      mimeType: m,
+      mediaType: type,
+      dimensions: parsedDim.dimensions,
+      width: parsedDim.width,
+      height: parsedDim.height,
+      thumbnail: values.get('image') ?? null,
+      size: parsePositiveInt(values.get('size') ?? null),
+      hash: values.get('x') ?? null,
+      thumbnailBlurhash: values.get('blurhash') ?? null,
+    };
+
+    if (type === 'audio' && !firstAudio) firstAudio = playable;
+    if (type === 'video' && !videoUrl) {
+      videoUrl = playable.url;
+      mimeType = playable.mimeType;
+      mediaType = playable.mediaType;
+      dimensions = playable.dimensions;
+      width = playable.width;
+      height = playable.height;
+      thumbnail = playable.thumbnail;
+      size = playable.size;
+      hash = playable.hash;
+      thumbnailBlurhash = playable.thumbnailBlurhash;
     }
   }
 
-  return { videoUrl, mimeType, width, height, imageUrls };
+  if (!videoUrl && firstAudio) {
+    videoUrl = firstAudio.url;
+    mimeType = firstAudio.mimeType;
+    mediaType = firstAudio.mediaType;
+    dimensions = firstAudio.dimensions;
+    width = firstAudio.width;
+    height = firstAudio.height;
+    thumbnail = firstAudio.thumbnail;
+    size = firstAudio.size;
+    hash = firstAudio.hash;
+    thumbnailBlurhash = firstAudio.thumbnailBlurhash;
+  }
+
+  return {
+    videoUrl,
+    mimeType,
+    dimensions,
+    width,
+    height,
+    imageUrls,
+    thumbnail,
+    size,
+    hash,
+    fallbackUrls,
+    thumbnailBlurhash,
+    mediaType,
+  };
+}
+
+function parseTextTracks(tags: string[][]): TextTrack[] {
+  return tags
+    .filter(entry => entry[0] === 'text-track')
+    .map(entry => {
+      if (entry[1]?.includes(' ')) {
+        const values = new Map<string, string>();
+        for (let i = 1; i < entry.length; i++) {
+          const firstSpace = entry[i].indexOf(' ');
+          if (firstSpace !== -1) values.set(entry[i].slice(0, firstSpace), entry[i].slice(firstSpace + 1).trim());
+        }
+        return { url: values.get('url') ?? '', lang: values.get('lang') ?? values.get('language') ?? null };
+      }
+      return { url: entry[1] ?? '', lang: entry[2] ?? null };
+    })
+    .filter(track => track.url.length > 0);
+}
+
+function parseOrigins(tags: string[][]): Origin[] {
+  return tags
+    .filter(entry => entry[0] === 'origin')
+    .map(entry => {
+      const metadata: Record<string, string> = {};
+      let platform = entry[1] ?? null;
+      let externalId = entry[2] ?? null;
+      let originalUrl = entry[3] ?? null;
+
+      for (let i = 1; i < entry.length; i++) {
+        const value = entry[i];
+        const separator = value.includes('=') ? '=' : value.includes(' ') ? ' ' : null;
+        if (!separator) continue;
+        const index = value.indexOf(separator);
+        const key = value.slice(0, index);
+        const metadataValue = value.slice(index + 1).trim();
+        if (!key || !metadataValue) continue;
+        metadata[key] = metadataValue;
+        if (key === 'platform') platform = metadataValue;
+        if (key === 'id' || key === 'externalId' || key === 'external_id') externalId = metadataValue;
+        if (key === 'url' || key === 'originalUrl' || key === 'original_url') originalUrl = metadataValue;
+      }
+
+      return { platform, externalId, originalUrl, metadata };
+    });
+}
+
+function isYouTubeUrl(url: string | null): boolean {
+  if (!url) return false;
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return hostname === 'youtu.be' || hostname.endsWith('.youtu.be') ||
+      hostname === 'youtube.com' || hostname.endsWith('.youtube.com');
+  } catch {
+    return /(^|\/\/|\.)(youtube\.com|youtu\.be)(\/|$)/i.test(url);
+  }
+}
+
+function mediaTypeFromUrl(url: string | null): 'video' | 'audio' | null {
+  if (!url) return null;
+  if (isYouTubeUrl(url)) return 'video';
+  const cleanUrl = url.split(/[?#]/, 1)[0]?.toLowerCase() ?? '';
+  if (/\.(mp3|m4a|aac|ogg|oga|opus|wav|flac)$/.test(cleanUrl)) return 'audio';
+  if (/\.(mp4|m4v|webm|mov|mkv|avi)$/.test(cleanUrl)) return 'video';
+  return null;
+}
+
+function generateNostubeUrl(row: { event_id: string; pubkey: string; kind: number; d_tag: string | null }): string {
+  const isHorizontal = row.kind === 21 || row.kind === 34235;
+  const baseUrl = isHorizontal ? 'https://nostu.be/v' : 'https://nostu.be/short';
+
+  if (row.kind >= 30000 && row.kind < 40000 && row.d_tag != null) {
+    const naddr = nip19.naddrEncode({
+      identifier: row.d_tag,
+      pubkey: row.pubkey,
+      kind: row.kind,
+    });
+    return `${baseUrl}/${naddr}?author=${row.pubkey}&video=${row.event_id}`;
+  }
+
+  const nevent = nip19.neventEncode({ id: row.event_id, author: row.pubkey });
+  if (row.kind === 21) return `${baseUrl}/${nevent}`;
+  return `${baseUrl}/${nevent}?author=${row.pubkey}&video=${row.event_id}`;
 }
 
 function toSearchDocument(
@@ -192,7 +392,8 @@ function toSearchDocument(
   const tags = getTags(row.raw_event);
 
   const title = firstTagValue(tags, 'title') ?? 'Untitled';
-  const summary = firstTagValue(tags, 'summary') ?? row.content ?? '';
+  const summary = firstTagValue(tags, 'summary') ?? firstTagValue(tags, 'alt') ?? row.content ?? '';
+  const contentPreview = summary.slice(0, 200);
 
   const candidateThumbnails: string[] = [];
   const thumbTag = firstTagValue(tags, 'thumb');
@@ -206,13 +407,24 @@ function toSearchDocument(
   }
 
   const videoUrl = imeta.videoUrl ?? firstTagValue(tags, 'url');
+  const dimensions = imeta.dimensions;
+  const mediaType = imeta.mediaType ?? mediaTypeFromUrl(videoUrl);
+  const duration = parsePositiveInt(firstTagValue(tags, 'duration'));
+  const publishedAt = parsePositiveInt(firstTagValue(tags, 'published_at'));
+  const textTracks = parseTextTracks(tags);
+  const origins = parseOrigins(tags);
 
   let npub = '';
   try { npub = nip19.npubEncode(row.pubkey); }
   catch { npub = row.pubkey; }
 
   const dTag = firstTagValue(tags, 'd');
+  const nostrUrl = generateNostubeUrl({ event_id: row.event_id, pubkey: row.pubkey, kind: row.kind, d_tag: dTag });
   const thumbnail = candidateThumbnails[0] ?? null;
+  const contentWarning = firstTagValue(tags, 'content-warning');
+  const isShort = row.kind === 22 || row.kind === 34236;
+  const isVideo = row.kind === 21 || row.kind === 34235;
+  const isNostrNative = !origins.some(origin => origin.platform?.toLowerCase() === 'youtube') && !isYouTubeUrl(videoUrl);
 
   const authorProfile = profileByPubkey.get(row.pubkey);
   const relationCounts = relationCountsByEventId.get(row.event_id) ?? defaultRelationCounts();
@@ -244,17 +456,37 @@ function toSearchDocument(
     pubkey: row.pubkey,
     npub,
     kind: row.kind,
+    identifier: dTag,
     title,
     summary,
+    content_preview: contentPreview,
     content: row.content,
     created_at: row.created_at,
+    published_at: publishedAt,
+    effectivePublishedAt: publishedAt ?? row.created_at,
+    duration,
     tags: collectTopicTags(tags),
     thumbnail,
     candidateThumbnails,
+    thumbnailBlurhash: imeta.thumbnailBlurhash,
     videoUrl,
     mimeType: imeta.mimeType,
+    mediaType,
+    dimensions,
     width: imeta.width,
     height: imeta.height,
+    isHd: (imeta.height ?? 0) >= 720,
+    isShort,
+    isVideo,
+    isNostrNative,
+    size: imeta.size,
+    hash: imeta.hash,
+    fallbackUrls: imeta.fallbackUrls,
+    contentWarning,
+    textTracks,
+    hasCaptions: textTracks.length > 0,
+    origins,
+    nostrUrl,
     d_tag: dTag,
     authorDisplayName: authorProfile?.display_name ?? authorProfile?.username ?? authorProfile?.name ?? null,
     relatedEventsTotal: relationCounts.relatedEventsTotal,
@@ -274,9 +506,12 @@ function toSearchDocument(
 
 async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promise<void> {
   const task = await client.index(uid).updateSettings({
-    searchableAttributes: ['title', 'tags', 'summary', 'content', 'authorDisplayName'],
-    filterableAttributes: ['kind', 'pubkey'],
-    sortableAttributes: ['rankingScore', 'created_at'],
+    searchableAttributes: ['title', 'tags', 'summary', 'content_preview', 'content', 'authorDisplayName'],
+    filterableAttributes: [
+      'kind', 'pubkey', 'published_at', 'created_at', 'duration', 'hasCaptions',
+      'effectivePublishedAt', 'isHd', 'isShort', 'isVideo', 'isNostrNative', 'mediaType',
+    ],
+    sortableAttributes: ['rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration'],
     rankingRules: [
       'words', 'typo', 'proximity', 'attribute', 'exactness',
       'rankingScore:desc', 'created_at:desc',
@@ -313,6 +548,7 @@ async function ensureIndexExists(
 ): Promise<void> {
   try {
     await client.getIndex(uid);
+    await applySettings(client, uid);
   } catch {
     const createTask = await client.createIndex(uid, { primaryKey });
     await client.waitForTask(createTask.taskUid);
@@ -582,6 +818,8 @@ async function main(): Promise<void> {
   console.log(`[Indexer] Source relays: ${sourceRelays.join(', ')}`);
 
   const client = new MeiliSearch({ host: meiliUrl, apiKey: meiliMasterKey });
+  await ensureIndexExists(client, INDEX_UID, 'id', applyVideoIndexSettings);
+  await ensureIndexExists(client, TERMS_INDEX_UID, 'id', applyTermsIndexSettings);
 
   const trustScoresEnabled = process.env.FETCH_TRUST_SCORES === 'true';
   let trustClientConnected = false;
