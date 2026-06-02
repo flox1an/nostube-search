@@ -95,6 +95,7 @@ const FEATURE_FILTERS = new Map([
   ['hd', 'isHd = true'],
   ['nostr', 'isNostrNative = true'],
 ])
+const SEARCHABLE_VIDEO_KINDS = new Set([21, 22, 34235, 34236])
 
 function toInt(input: string | undefined, fallback: number): number {
   const n = Number(input)
@@ -130,11 +131,29 @@ function parseDateFilter(input: string | undefined): string | undefined {
   return threshold ? `effectivePublishedAt >= ${threshold}` : undefined
 }
 
+function parseKindFilters(input: string | string[] | undefined): string | undefined {
+  const values = Array.isArray(input)
+    ? input.flatMap(value => value.split(','))
+    : typeof input === 'string'
+      ? input.split(',')
+      : []
+
+  const kinds = [...new Set(values
+    .map(value => Number(value.trim()))
+    .filter(kind => Number.isInteger(kind) && SEARCHABLE_VIDEO_KINDS.has(kind))
+  )]
+
+  if (kinds.length === 0) return undefined
+  if (kinds.length === 1) return `kind = ${kinds[0]}`
+  return `(${kinds.map(kind => `kind = ${kind}`).join(' OR ')})`
+}
+
 function parseSearchFilters(query: {
   type?: string
   duration?: string
   date?: string
   feature?: string | string[]
+  kinds?: string | string[]
 }): string[] {
   const filters: string[] = []
 
@@ -150,6 +169,9 @@ function parseSearchFilters(query: {
 
   const dateFilter = parseDateFilter(query.date)
   if (dateFilter) filters.push(dateFilter)
+
+  const kindFilter = parseKindFilters(query.kinds)
+  if (kindFilter) filters.push(kindFilter)
 
   const features = Array.isArray(query.feature)
     ? query.feature.flatMap(feature => feature.split(','))
@@ -257,7 +279,8 @@ async function meiliSearch(params: {
   })
 
   if (!res.ok) {
-    throw new Error(`MeiliSearch request failed with status ${res.status}`)
+    const body = await res.text().catch(() => '')
+    throw new Error(`MeiliSearch request failed with status ${res.status}: ${body}`)
   }
 
   return res.json() as Promise<{
@@ -279,6 +302,7 @@ app.get('/api/search', async c => {
     duration: c.req.query('duration'),
     date: c.req.query('date'),
     feature: c.req.queries('feature') ?? c.req.query('feature'),
+    kinds: c.req.queries('kinds') ?? c.req.query('kinds'),
   })
 
   try {
@@ -293,7 +317,8 @@ app.get('/api/search', async c => {
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
 
     return c.json({ hits, total, limit, offset })
-  } catch {
+  } catch (err) {
+    console.error('[API] Search request failed:', err)
     return c.json({ error: 'Search engine unavailable' }, 502)
   }
 })

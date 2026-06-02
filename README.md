@@ -50,6 +50,7 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 | `limit` | `20` | Results per page (non-negative integer) |
 | `offset` | `0` | Pagination offset |
 | `type` | `all` | One of: `all`, `videos`, `shorts`, `audio` |
+| `kinds` | — | Comma-separated or repeatable Nostr video event kinds. Supported: `21`, `22`, `34235`, `34236` |
 | `duration` | `any` | One of: `any`, `short` (`<180s`), `medium` (`180s..1200s`), `long` (`>1200s`) |
 | `date` | `any` | One of: `any`, `today`, `week`, `month`, `year`; based on `published_at ?? created_at` |
 | `feature` | — | Repeatable or comma-separated. Values: `captions`, `hd`, `nostr` |

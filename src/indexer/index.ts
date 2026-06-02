@@ -513,7 +513,7 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
     ],
     sortableAttributes: ['rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration'],
     rankingRules: [
-      'words', 'typo', 'proximity', 'attribute', 'exactness',
+      'words', 'typo', 'proximity', 'attribute', 'exactness', 'sort',
       'rankingScore:desc', 'created_at:desc',
     ],
   });
