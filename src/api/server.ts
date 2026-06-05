@@ -5,10 +5,12 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { nip19, SimplePool, type Event } from 'nostr-tools'
 import {
+  AsyncTtlCache,
   buildUserRecommendationProfile,
   contentSimilarity,
   extractUserSignalRefs,
   getAuthorAffinity,
+  getKindAffinity,
   getTagAffinity,
   mapRecommendationHit,
   normalizePubkey,
@@ -65,6 +67,8 @@ type SearchHit = {
   _rankingScore?: number
   authorDisplayName?: string | null
 }
+
+type VideoLookup = ReturnType<typeof parseVideoRef>
 
 const meiliUrl = process.env.MEILI_URL
 const meiliMasterKey = process.env.MEILI_MASTER_KEY
@@ -328,7 +332,132 @@ async function findVideoByRef(videoRef: string): Promise<SearchHit | null> {
       ]
 
   const result = await meiliSearch({ q: '', limit: 1, offset: 0, filter })
-  return result.hits[0] ?? null
+  return result.hits[0] ?? await fetchVideoFromRelayHints(lookup)
+}
+
+function firstTagValue(tags: string[][], tagName: string): string | null {
+  const tag = tags.find(entry => entry[0] === tagName && typeof entry[1] === 'string')
+  return tag?.[1] ?? null
+}
+
+function parsePositiveInt(value: string | null): number | null {
+  if (!value) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null
+}
+
+function parseImetaForSource(tags: string[][]): Pick<SearchHit, 'thumbnail' | 'thumbnailBlurhash' | 'videoUrl' | 'mediaType'> {
+  let thumbnail: string | null = null
+  let thumbnailBlurhash: string | null = null
+  let videoUrl: string | null = null
+  let mediaType: 'video' | 'audio' | null = null
+
+  for (const imeta of tags.filter(tag => tag[0] === 'imeta')) {
+    const values = new Map<string, string>()
+    for (const part of imeta.slice(1)) {
+      const firstSpace = part.indexOf(' ')
+      if (firstSpace === -1) continue
+      values.set(part.slice(0, firstSpace), part.slice(firstSpace + 1).trim())
+    }
+
+    if (!thumbnail && values.get('image')) thumbnail = values.get('image') ?? null
+    if (!thumbnailBlurhash && values.get('blurhash')) thumbnailBlurhash = values.get('blurhash') ?? null
+
+    const url = values.get('url')
+    const mime = values.get('m')
+    if (!videoUrl && url && mime?.startsWith('video/')) {
+      videoUrl = url
+      mediaType = 'video'
+    }
+    if (!videoUrl && url && mime?.startsWith('audio/')) {
+      videoUrl = url
+      mediaType = 'audio'
+    }
+  }
+
+  return { thumbnail, thumbnailBlurhash, videoUrl, mediaType }
+}
+
+function eventToSearchHit(event: Event): SearchHit {
+  const tags = event.tags.filter((tag): tag is string[] =>
+    Array.isArray(tag) && tag.every(item => typeof item === 'string'),
+  )
+  const imeta = parseImetaForSource(tags)
+  const thumbnail = firstTagValue(tags, 'thumb') ?? firstTagValue(tags, 'image') ?? imeta.thumbnail
+  const videoUrl = imeta.videoUrl ?? firstTagValue(tags, 'url')
+  const summary = firstTagValue(tags, 'summary') ?? firstTagValue(tags, 'alt') ?? event.content ?? ''
+  const publishedAt = parsePositiveInt(firstTagValue(tags, 'published_at'))
+  const kind = event.kind
+
+  return {
+    event_id: event.id,
+    pubkey: event.pubkey,
+    kind,
+    created_at: event.created_at,
+    published_at: publishedAt,
+    effectivePublishedAt: publishedAt ?? event.created_at,
+    identifier: firstTagValue(tags, 'd'),
+    d_tag: firstTagValue(tags, 'd'),
+    title: firstTagValue(tags, 'title') ?? 'Untitled',
+    summary,
+    content_preview: summary.slice(0, 200),
+    content: event.content,
+    tags: tags.filter(tag => tag[0] === 't' && tag[1]).map(tag => tag[1]),
+    duration: parsePositiveInt(firstTagValue(tags, 'duration')),
+    thumbnail,
+    thumbnailBlurhash: imeta.thumbnailBlurhash,
+    videoUrl,
+    mediaType: imeta.mediaType ?? (videoUrl ? 'video' : null),
+    isShort: kind === 22 || kind === 34236,
+    isVideo: kind === 21 || kind === 34235,
+    contentWarning: firstTagValue(tags, 'content-warning'),
+    rankingScore: 0,
+    reactionsCount: 0,
+    commentsCount: 0,
+    zapsCount: 0,
+  }
+}
+
+async function fetchVideoFromRelayHints(lookup: VideoLookup): Promise<SearchHit | null> {
+  if (lookup.relays.length === 0) return null
+
+  return relayHintVideoCache.getOrCreate(
+    videoLookupCacheKey(lookup),
+    () => fetchVideoFromRelayHintsUncached(lookup),
+    getPositiveEnvMs('RECOMMENDATION_REF_CACHE_TTL_MS', 5 * 60_000),
+  )
+}
+
+function videoLookupCacheKey(lookup: VideoLookup): string {
+  const relayKey = [...lookup.relays].sort().join(',')
+  if (lookup.type === 'event') return `event:${lookup.eventId}:${relayKey}`
+  return `addr:${lookup.kind}:${lookup.pubkey}:${lookup.identifier}:${relayKey}`
+}
+
+const relayHintVideoCache = new AsyncTtlCache<string, SearchHit | null>()
+
+function getPositiveEnvMs(name: string, fallback: number): number {
+  const value = Number(process.env[name])
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback
+}
+
+async function fetchVideoFromRelayHintsUncached(lookup: VideoLookup): Promise<SearchHit | null> {
+  const pool = new SimplePool({ enablePing: false, enableReconnect: false })
+  const maxWait = getPositiveEnvMs('RECOMMENDATION_REF_MAX_WAIT_MS', 5_000)
+
+  try {
+    const filter = lookup.type === 'event'
+      ? [{ ids: [lookup.eventId], limit: 1 }]
+      : [{ kinds: [lookup.kind], authors: [lookup.pubkey], '#d': [lookup.identifier], limit: 1 }]
+    const events = await pool.querySync(
+      lookup.relays,
+      filter[0],
+      { maxWait, label: 'nostube-search-recommendation-ref' },
+    )
+    return events[0] ? eventToSearchHit(events[0]) : null
+  } finally {
+    pool.destroy()
+  }
 }
 
 function recommendationQuery(source: SearchHit): string {
@@ -421,27 +550,40 @@ async function searchReferenceVideos(filter: string | null, limit: number): Prom
   return result.hits ?? []
 }
 
-const userProfileCache = new Map<string, { expiresAt: number; profile: UserRecommendationProfile }>()
+const userProfileCache = new AsyncTtlCache<string, UserRecommendationProfile | null>()
 
 async function getUserRecommendationProfile(pubkey: string): Promise<UserRecommendationProfile | null> {
-  const ttlMs = Number(process.env.USER_RECOMMENDATION_PROFILE_TTL_MS) || 30 * 60_000
   const cached = userProfileCache.get(pubkey)
-  if (cached && cached.expiresAt > Date.now()) return cached.profile
+  if (cached !== undefined) return cached
 
-  try {
-    const signals = await fetchUserSignalEvents(pubkey)
-    const refs = extractUserSignalRefs(signals)
-    const [eventVideos, addressVideos] = await Promise.all([
-      searchReferenceVideos(eventIdFilter(refs.eventIds.slice(0, 100)), 100),
-      searchReferenceVideos(addressFilter(refs.addresses.slice(0, 100)), 100),
-    ])
-    const profile = buildUserRecommendationProfile(pubkey, signals, [...eventVideos, ...addressVideos])
-    userProfileCache.set(pubkey, { expiresAt: Date.now() + ttlMs, profile })
-    return profile
-  } catch (err) {
-    console.warn('[API] Recommendation profile unavailable; using anonymous ranking:', err)
-    return null
+  const ttlMs = getPositiveEnvMs('USER_RECOMMENDATION_PROFILE_TTL_MS', 30 * 60_000)
+  const shouldBlock = process.env.RECOMMENDATION_BLOCK_ON_PROFILE_MISS === 'true'
+  if (shouldBlock) {
+    try {
+      return await userProfileCache.getOrCreate(pubkey, () => buildUserRecommendationProfileFromRelays(pubkey), ttlMs)
+    } catch (err) {
+      console.warn('[API] Recommendation profile unavailable; using anonymous ranking:', err)
+      return null
+    }
   }
+
+  void userProfileCache
+    .getOrCreate(pubkey, () => buildUserRecommendationProfileFromRelays(pubkey), ttlMs)
+    .catch(err => {
+      console.warn('[API] Recommendation profile warmup failed:', err)
+    })
+
+  return null
+}
+
+async function buildUserRecommendationProfileFromRelays(pubkey: string): Promise<UserRecommendationProfile> {
+  const signals = await fetchUserSignalEvents(pubkey)
+  const refs = extractUserSignalRefs(signals)
+  const [eventVideos, addressVideos] = await Promise.all([
+    searchReferenceVideos(eventIdFilter(refs.eventIds.slice(0, 100)), 100),
+    searchReferenceVideos(addressFilter(refs.addresses.slice(0, 100)), 100),
+  ])
+  return buildUserRecommendationProfile(pubkey, signals, [...eventVideos, ...addressVideos])
 }
 
 async function relatedVideos(input: {
@@ -473,6 +615,7 @@ async function relatedVideos(input: {
         contentSimilarity: contentSimilarity(source, candidate, candidate._rankingScore),
         tagAffinity: getTagAffinity(candidate, profile),
         authorAffinity: getAuthorAffinity(candidate, profile),
+        kindAffinity: getKindAffinity(candidate, profile),
         loggedIn,
       })
       return { candidate, score }

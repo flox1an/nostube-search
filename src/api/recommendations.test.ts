@@ -3,7 +3,9 @@ import { describe, it } from 'node:test';
 import { nip19 } from 'nostr-tools';
 
 import {
+  AsyncTtlCache,
   buildUserRecommendationProfile,
+  getKindAffinity,
   getTagAffinity,
   mapRecommendationHit,
   parseVideoRef,
@@ -19,26 +21,39 @@ describe('parseVideoRef', () => {
     assert.deepEqual(parseVideoRef(eventId), {
       type: 'event',
       eventId,
+      relays: [],
     });
   });
 
   it('resolves nevent references as event_id lookups', () => {
-    const nevent = nip19.neventEncode({ id: eventId, author: pubkey, kind: 21 });
+    const nevent = nip19.neventEncode({
+      id: eventId,
+      author: pubkey,
+      kind: 21,
+      relays: ['wss://relay.example.com'],
+    });
 
     assert.deepEqual(parseVideoRef(nevent), {
       type: 'event',
       eventId,
+      relays: ['wss://relay.example.com'],
     });
   });
 
   it('resolves naddr references as address lookups', () => {
-    const naddr = nip19.naddrEncode({ kind: 34235, pubkey, identifier: 'intro' });
+    const naddr = nip19.naddrEncode({
+      kind: 34235,
+      pubkey,
+      identifier: 'intro',
+      relays: ['wss://relay.example.com'],
+    });
 
     assert.deepEqual(parseVideoRef(naddr), {
       type: 'address',
       kind: 34235,
       pubkey,
       identifier: 'intro',
+      relays: ['wss://relay.example.com'],
     });
   });
 });
@@ -115,6 +130,27 @@ describe('scoreRecommendation', () => {
 
     assert.equal(Number((scoreWithAuthor - scoreWithoutAuthor).toFixed(2)), 0.05);
   });
+
+  it('keeps kind affinity tiny for logged-in users', () => {
+    const scoreWithoutKind = scoreRecommendation({
+      candidate: { rankingScore: 0.5, reactionsCount: 0, commentsCount: 0, zapsCount: 0 },
+      contentSimilarity: 0.5,
+      tagAffinity: 0,
+      authorAffinity: 0,
+      kindAffinity: 0,
+      loggedIn: true,
+    });
+    const scoreWithKind = scoreRecommendation({
+      candidate: { rankingScore: 0.5, reactionsCount: 0, commentsCount: 0, zapsCount: 0 },
+      contentSimilarity: 0.5,
+      tagAffinity: 0,
+      authorAffinity: 0,
+      kindAffinity: 1,
+      loggedIn: true,
+    });
+
+    assert.equal(Number((scoreWithKind - scoreWithoutKind).toFixed(2)), 0.03);
+  });
 });
 
 describe('user recommendation profile', () => {
@@ -127,5 +163,29 @@ describe('user recommendation profile', () => {
 
     assert.equal(getTagAffinity({ tags: ['nostr'] }, profile), 1);
     assert.equal(getTagAffinity({ tags: ['cooking'] }, profile), 0);
+    assert.equal(getKindAffinity({ kind: 21 }, profile), 1);
+    assert.equal(getKindAffinity({ kind: 22 }, profile), 0);
+  });
+});
+
+describe('AsyncTtlCache', () => {
+  it('deduplicates concurrent cache misses and then serves cached values', async () => {
+    const cache = new AsyncTtlCache<string, number>();
+    let calls = 0;
+    const factory = async () => {
+      calls++;
+      return 7;
+    };
+
+    const [first, second] = await Promise.all([
+      cache.getOrCreate('score', factory, 1_000),
+      cache.getOrCreate('score', factory, 1_000),
+    ]);
+    const third = await cache.getOrCreate('score', factory, 1_000);
+
+    assert.equal(first, 7);
+    assert.equal(second, 7);
+    assert.equal(third, 7);
+    assert.equal(calls, 1);
   });
 });

@@ -1,8 +1,8 @@
 import { nip19 } from 'nostr-tools';
 
 export type VideoRefLookup =
-  | { type: 'event'; eventId: string }
-  | { type: 'address'; kind: number; pubkey: string; identifier: string };
+  | { type: 'event'; eventId: string; relays: string[] }
+  | { type: 'address'; kind: number; pubkey: string; identifier: string; relays: string[] };
 
 export type RecommendationSearchHit = {
   event_id?: string;
@@ -72,6 +72,44 @@ export type UserSignalEvent = {
 const HEX_EVENT_ID_RE = /^[a-f0-9]{64}$/i;
 const ADDRESSABLE_KINDS = new Set([34235, 34236]);
 
+export class AsyncTtlCache<K, V> {
+  private values = new Map<K, { value: V; expiresAt: number }>();
+  private inFlight = new Map<K, Promise<V>>();
+
+  get(key: K): V | undefined {
+    const cached = this.values.get(key);
+    if (!cached) return undefined;
+    if (cached.expiresAt <= Date.now()) {
+      this.values.delete(key);
+      return undefined;
+    }
+    return cached.value;
+  }
+
+  set(key: K, value: V, ttlMs: number): void {
+    this.values.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+
+  getOrCreate(key: K, factory: () => Promise<V>, ttlMs: number): Promise<V> {
+    const cached = this.get(key);
+    if (cached !== undefined) return Promise.resolve(cached);
+
+    const pending = this.inFlight.get(key);
+    if (pending) return pending;
+
+    const promise = factory()
+      .then(value => {
+        this.set(key, value, ttlMs);
+        return value;
+      })
+      .finally(() => {
+        this.inFlight.delete(key);
+      });
+    this.inFlight.set(key, promise);
+    return promise;
+  }
+}
+
 function clamp(value: number, min = 0, max = 1): number {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, value));
@@ -83,11 +121,11 @@ function getIdentifier(hit: RecommendationSearchHit): string | undefined {
 
 export function parseVideoRef(videoRef: string): VideoRefLookup {
   const trimmed = videoRef.trim();
-  if (HEX_EVENT_ID_RE.test(trimmed)) return { type: 'event', eventId: trimmed.toLowerCase() };
+  if (HEX_EVENT_ID_RE.test(trimmed)) return { type: 'event', eventId: trimmed.toLowerCase(), relays: [] };
 
   const decoded = nip19.decode(trimmed);
   if (decoded.type === 'nevent') {
-    return { type: 'event', eventId: decoded.data.id };
+    return { type: 'event', eventId: decoded.data.id, relays: decoded.data.relays ?? [] };
   }
   if (decoded.type === 'naddr') {
     return {
@@ -95,6 +133,7 @@ export function parseVideoRef(videoRef: string): VideoRefLookup {
       kind: decoded.data.kind,
       pubkey: decoded.data.pubkey,
       identifier: decoded.data.identifier,
+      relays: decoded.data.relays ?? [],
     };
   }
 
@@ -267,11 +306,17 @@ export function getAuthorAffinity(candidate: RecommendationSearchHit, profile: U
   return clamp(profile.authorAffinity[candidate.pubkey] ?? 0);
 }
 
+export function getKindAffinity(candidate: RecommendationSearchHit, profile: UserRecommendationProfile | null): number {
+  if (!profile || typeof candidate.kind !== 'number') return 0;
+  return clamp(profile.kindAffinity[candidate.kind] ?? 0);
+}
+
 export function scoreRecommendation(input: {
   candidate: Pick<RecommendationSearchHit, 'rankingScore' | 'reactionsCount' | 'commentsCount' | 'zapsCount'>;
   contentSimilarity: number;
   tagAffinity?: number;
   authorAffinity?: number;
+  kindAffinity?: number;
   loggedIn: boolean;
 }): number {
   const rankingScore = clamp(input.candidate.rankingScore ?? 0);
@@ -279,17 +324,19 @@ export function scoreRecommendation(input: {
   const contentSimilarity = clamp(input.contentSimilarity);
   const tagAffinity = clamp(input.tagAffinity ?? 0);
   const authorAffinity = clamp(input.authorAffinity ?? 0);
+  const kindAffinity = clamp(input.kindAffinity ?? 0);
 
   if (!input.loggedIn) {
     return clamp(contentSimilarity * 0.7 + rankingScore * 0.2 + engagementScore * 0.1);
   }
 
   return clamp(
-    contentSimilarity * 0.5 +
-    tagAffinity * 0.25 +
+    contentSimilarity * 0.48 +
+    tagAffinity * 0.24 +
     rankingScore * 0.15 +
     engagementScore * 0.05 +
-    authorAffinity * 0.05,
+    authorAffinity * 0.05 +
+    kindAffinity * 0.03,
   );
 }
 
