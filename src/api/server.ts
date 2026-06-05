@@ -3,7 +3,20 @@ import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { nip19 } from 'nostr-tools'
+import { nip19, SimplePool, type Event } from 'nostr-tools'
+import {
+  buildUserRecommendationProfile,
+  contentSimilarity,
+  extractUserSignalRefs,
+  getAuthorAffinity,
+  getTagAffinity,
+  mapRecommendationHit,
+  normalizePubkey,
+  parseVideoRef,
+  scoreRecommendation,
+  type RecommendationSearchHit,
+  type UserRecommendationProfile,
+} from './recommendations.js'
 
 type SearchHit = {
   event_id?: string
@@ -46,6 +59,10 @@ type SearchHit = {
   }>
   nostrUrl?: string
   rankingScore?: number
+  reactionsCount?: number
+  commentsCount?: number
+  zapsCount?: number
+  _rankingScore?: number
   authorDisplayName?: string | null
 }
 
@@ -268,6 +285,7 @@ async function meiliSearch(params: {
   offset?: number
   sort?: string[]
   filter?: string[]
+  showRankingScore?: boolean
 }) {
   const res = await fetch(`${meiliUrl}/indexes/videos/search`, {
     method: 'POST',
@@ -288,6 +306,181 @@ async function meiliSearch(params: {
     estimatedTotalHits?: number
     totalHits?: number
   }>
+}
+
+function quoteFilterValue(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+function sourceRelaysFromEnv(): string[] {
+  const raw = process.env.NOSTR_SOURCE_RELAYS ?? 'wss://relay.nostu.be'
+  return raw.split(',').map(relay => relay.trim()).filter(Boolean)
+}
+
+async function findVideoByRef(videoRef: string): Promise<SearchHit | null> {
+  const lookup = parseVideoRef(videoRef)
+  const filter = lookup.type === 'event'
+    ? [`event_id = ${quoteFilterValue(lookup.eventId)}`]
+    : [
+        `kind = ${lookup.kind}`,
+        `pubkey = ${quoteFilterValue(lookup.pubkey)}`,
+        `identifier = ${quoteFilterValue(lookup.identifier)}`,
+      ]
+
+  const result = await meiliSearch({ q: '', limit: 1, offset: 0, filter })
+  return result.hits[0] ?? null
+}
+
+function recommendationQuery(source: SearchHit): string {
+  return [
+    source.title,
+    ...(Array.isArray(source.tags) ? source.tags : []),
+    source.summary,
+    source.content_preview,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 600)
+}
+
+function candidateFilters(source: SearchHit): string[] {
+  if (source.isShort) return ['isShort = true']
+  if (source.isVideo) return ['isVideo = true']
+  if (source.mediaType) return [`mediaType = ${quoteFilterValue(source.mediaType)}`]
+  return []
+}
+
+function addressKey(hit: SearchHit): string | null {
+  const identifier = hit.identifier ?? hit.d_tag
+  if (!hit.kind || !hit.pubkey || !identifier) return null
+  return `${hit.kind}:${hit.pubkey}:${identifier}`
+}
+
+function isSameVideo(a: SearchHit, b: SearchHit): boolean {
+  if (a.event_id && b.event_id && a.event_id === b.event_id) return true
+  const aAddress = addressKey(a)
+  const bAddress = addressKey(b)
+  return Boolean(aAddress && bAddress && aAddress === bAddress)
+}
+
+function filterAndDedupeCandidates(source: SearchHit, candidates: SearchHit[], excludeContentWarnings: boolean): SearchHit[] {
+  const seen = new Set<string>()
+  const out: SearchHit[] = []
+
+  for (const candidate of candidates) {
+    if (isSameVideo(source, candidate)) continue
+    if (excludeContentWarnings && candidate.contentWarning) continue
+
+    const key = addressKey(candidate) ?? candidate.event_id
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(candidate)
+  }
+
+  return out
+}
+
+async function fetchUserSignalEvents(pubkey: string): Promise<Event[]> {
+  const pool = new SimplePool({ enablePing: false, enableReconnect: false })
+  const maxWait = Number(process.env.RECOMMENDATION_SIGNAL_MAX_WAIT_MS) || 5_000
+  const limit = Number(process.env.RECOMMENDATION_SIGNAL_LIMIT) || 300
+
+  try {
+    return await pool.querySync(
+      sourceRelaysFromEnv(),
+      { authors: [pubkey], kinds: [7, 1, 9735], limit },
+      { maxWait, label: 'nostube-search-recommendation-signals' },
+    )
+  } finally {
+    pool.destroy()
+  }
+}
+
+function eventIdFilter(eventIds: string[]): string | null {
+  if (eventIds.length === 0) return null
+  return `(${eventIds.map(id => `event_id = ${quoteFilterValue(id)}`).join(' OR ')})`
+}
+
+function addressFilter(addresses: string[]): string | null {
+  const filters = addresses
+    .map(address => {
+      const [kind, pubkey, ...identifierParts] = address.split(':')
+      const identifier = identifierParts.join(':')
+      const numericKind = Number(kind)
+      if (!Number.isInteger(numericKind) || !pubkey || !identifier) return null
+      return `(kind = ${numericKind} AND pubkey = ${quoteFilterValue(pubkey)} AND identifier = ${quoteFilterValue(identifier)})`
+    })
+    .filter((filter): filter is string => Boolean(filter))
+
+  return filters.length > 0 ? `(${filters.join(' OR ')})` : null
+}
+
+async function searchReferenceVideos(filter: string | null, limit: number): Promise<SearchHit[]> {
+  if (!filter) return []
+  const result = await meiliSearch({ q: '', limit, offset: 0, filter: [filter] })
+  return result.hits ?? []
+}
+
+const userProfileCache = new Map<string, { expiresAt: number; profile: UserRecommendationProfile }>()
+
+async function getUserRecommendationProfile(pubkey: string): Promise<UserRecommendationProfile | null> {
+  const ttlMs = Number(process.env.USER_RECOMMENDATION_PROFILE_TTL_MS) || 30 * 60_000
+  const cached = userProfileCache.get(pubkey)
+  if (cached && cached.expiresAt > Date.now()) return cached.profile
+
+  try {
+    const signals = await fetchUserSignalEvents(pubkey)
+    const refs = extractUserSignalRefs(signals)
+    const [eventVideos, addressVideos] = await Promise.all([
+      searchReferenceVideos(eventIdFilter(refs.eventIds.slice(0, 100)), 100),
+      searchReferenceVideos(addressFilter(refs.addresses.slice(0, 100)), 100),
+    ])
+    const profile = buildUserRecommendationProfile(pubkey, signals, [...eventVideos, ...addressVideos])
+    userProfileCache.set(pubkey, { expiresAt: Date.now() + ttlMs, profile })
+    return profile
+  } catch (err) {
+    console.warn('[API] Recommendation profile unavailable; using anonymous ranking:', err)
+    return null
+  }
+}
+
+async function relatedVideos(input: {
+  videoRef: string
+  user?: string | null
+  limit: number
+  excludeContentWarnings: boolean
+}) {
+  const source = await findVideoByRef(input.videoRef)
+  if (!source) return null
+
+  const candidateLimit = Math.max(input.limit * 4, input.limit)
+  const result = await meiliSearch({
+    q: recommendationQuery(source),
+    limit: candidateLimit,
+    offset: 0,
+    filter: candidateFilters(source),
+    showRankingScore: true,
+  })
+
+  const userPubkey = normalizePubkey(input.user)
+  const profile = userPubkey ? await getUserRecommendationProfile(userPubkey) : null
+  const loggedIn = Boolean(profile)
+
+  const ranked = filterAndDedupeCandidates(source, result.hits ?? [], input.excludeContentWarnings)
+    .map(candidate => {
+      const score = scoreRecommendation({
+        candidate,
+        contentSimilarity: contentSimilarity(source, candidate, candidate._rankingScore),
+        tagAffinity: getTagAffinity(candidate, profile),
+        authorAffinity: getAuthorAffinity(candidate, profile),
+        loggedIn,
+      })
+      return { candidate, score }
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, input.limit)
+
+  return ranked.map(({ candidate, score }) => mapRecommendationHit(candidate as RecommendationSearchHit, score))
 }
 
 app.get('/api/search', async c => {
@@ -361,6 +554,54 @@ app.get('/api/search/completion', async c => {
     return c.json({ completions })
   } catch {
     return c.json({ error: 'Search engine unavailable' }, 502)
+  }
+})
+
+app.post('/api/recommendations/related', async c => {
+  let body: {
+    videoRef?: unknown
+    user?: unknown
+    limit?: unknown
+    excludeContentWarnings?: unknown
+  }
+
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  if (typeof body.videoRef !== 'string' || !body.videoRef.trim()) {
+    return c.json({ error: 'Missing videoRef' }, 400)
+  }
+
+  const rawLimit = typeof body.limit === 'number' || typeof body.limit === 'string'
+    ? String(body.limit)
+    : undefined
+  const limit = Math.max(1, Math.min(toInt(rawLimit, 20), 50))
+  const excludeContentWarnings = typeof body.excludeContentWarnings === 'boolean'
+    ? body.excludeContentWarnings
+    : true
+
+  try {
+    const hits = await relatedVideos({
+      videoRef: body.videoRef,
+      user: typeof body.user === 'string' ? body.user : null,
+      limit,
+      excludeContentWarnings,
+    })
+
+    if (!hits) return c.json({ error: 'Video not found' }, 404)
+    return c.json({ hits, total: hits.length, limit })
+  } catch (err) {
+    if (err instanceof Error && (
+      err.message.startsWith('Unsupported videoRef') ||
+      err.message.startsWith('User must')
+    )) {
+      return c.json({ error: err.message }, 400)
+    }
+    console.error('[API] Related recommendations request failed:', err)
+    return c.json({ error: 'Recommendations unavailable' }, 502)
   }
 })
 

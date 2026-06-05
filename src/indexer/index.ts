@@ -42,7 +42,7 @@ type VideoEventRow = {
   kind: number;
   created_at: number;
   content: string | null;
-  raw_event: { tags?: unknown };
+  raw_event: Event;
 };
 
 type EventUrlStats = { urlsTotal: number; urlsAvailable: number };
@@ -131,6 +131,7 @@ type SearchDocument = {
   videoMetadataCompleteness: number;
   globalTrustScore: number;
   rankingScore: number;
+  raw_event: Event;
 };
 
 // ── Env helpers ───────────────────────────────────────────────────────────────
@@ -172,7 +173,7 @@ function eventToVideoRow(event: Event): VideoEventRow {
     kind: event.kind,
     created_at: event.created_at,
     content: event.content || null,
-    raw_event: { tags: event.tags },
+    raw_event: event,
   };
 }
 
@@ -499,6 +500,7 @@ function toSearchDocument(
     videoMetadataCompleteness,
     globalTrustScore,
     rankingScore,
+    raw_event: row.raw_event,
   };
 }
 
@@ -508,8 +510,9 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
   const task = await client.index(uid).updateSettings({
     searchableAttributes: ['title', 'tags', 'summary', 'content_preview', 'content', 'authorDisplayName'],
     filterableAttributes: [
-      'kind', 'pubkey', 'published_at', 'created_at', 'duration', 'hasCaptions',
+      'event_id', 'kind', 'pubkey', 'published_at', 'created_at', 'duration', 'hasCaptions',
       'effectivePublishedAt', 'isHd', 'isShort', 'isVideo', 'isNostrNative', 'mediaType',
+      'identifier', 'd_tag',
     ],
     sortableAttributes: ['rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration'],
     rankingRules: [

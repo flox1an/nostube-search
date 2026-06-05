@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "tsx --env-file=.env src/index.ts"
+    "start": "tsx --env-file=.env src/index.ts",
+    "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@contextvm/sdk": "^0.11.11",
