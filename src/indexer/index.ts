@@ -420,6 +420,8 @@ function toSearchDocument(
   catch { npub = row.pubkey; }
 
   const dTag = firstTagValue(tags, 'd');
+  const isAddressable = row.kind >= 30000 && row.kind < 40000;
+  const docId = isAddressable && dTag !== null ? `${row.kind}:${row.pubkey}:${dTag}` : row.event_id;
   const nostrUrl = generateNostubeUrl({ event_id: row.event_id, pubkey: row.pubkey, kind: row.kind, d_tag: dTag });
   const thumbnail = candidateThumbnails[0] ?? null;
   const contentWarning = firstTagValue(tags, 'content-warning');
@@ -452,7 +454,7 @@ function toSearchDocument(
   });
 
   return {
-    id: row.event_id,
+    id: docId,
     event_id: row.event_id,
     pubkey: row.pubkey,
     npub,

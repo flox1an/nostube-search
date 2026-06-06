@@ -50,7 +50,8 @@ export async function fetchVideoEventsSince(relays: string[], since: number): Pr
     }
   }
 
-  return Array.from(seen.values()).sort((a, b) => a.created_at - b.created_at);
+  const deduplicated = deduplicateAddressableEvents(Array.from(seen.values()));
+  return deduplicated.sort((a, b) => a.created_at - b.created_at);
 }
 
 async function fetchAllVideoEventsFromRelay(relay: string, seen: Map<string, Event>): Promise<void> {
@@ -81,6 +82,28 @@ async function fetchAllVideoEventsFromRelay(relay: string, seen: Map<string, Eve
   }
 }
 
+function deduplicateAddressableEvents(events: Event[]): Event[] {
+  // For addressable events (NIP-33), keep only the newest version per kind:pubkey:d_tag.
+  // Different relays may hold older copies with distinct event IDs.
+  const addressable = new Map<string, Event>();
+  const regular: Event[] = [];
+
+  for (const e of events) {
+    if (e.kind >= 30000 && e.kind < 40000) {
+      const dTag = e.tags.find(t => t[0] === 'd')?.[1] ?? '';
+      const addr = `${e.kind}:${e.pubkey}:${dTag}`;
+      const existing = addressable.get(addr);
+      if (!existing || e.created_at > existing.created_at) {
+        addressable.set(addr, e);
+      }
+    } else {
+      regular.push(e);
+    }
+  }
+
+  return [...regular, ...addressable.values()];
+}
+
 export async function fetchAllVideoEvents(relays: string[]): Promise<Event[]> {
   const seen = new Map<string, Event>();
 
@@ -91,7 +114,8 @@ export async function fetchAllVideoEvents(relays: string[]): Promise<Event[]> {
     await fetchAllVideoEventsFromRelay(relay, seen);
   }
 
-  return Array.from(seen.values()).sort((a, b) => a.created_at - b.created_at);
+  const deduplicated = deduplicateAddressableEvents(Array.from(seen.values()));
+  return deduplicated.sort((a, b) => a.created_at - b.created_at);
 }
 
 const RELATION_FILTER_CHUNK_SIZE = 50;
