@@ -824,6 +824,15 @@ async function main(): Promise<void> {
   await ensureIndexExists(client, INDEX_UID, 'id', applyVideoIndexSettings);
   await ensureIndexExists(client, TERMS_INDEX_UID, 'id', applyTermsIndexSettings);
 
+  const [videosStats, termsStats] = await Promise.all([
+    client.index(INDEX_UID).getStats(),
+    client.index(TERMS_INDEX_UID).getStats(),
+  ]);
+  console.log(
+    `[Indexer] Index status: ${INDEX_UID}=${videosStats.numberOfDocuments} docs, ` +
+    `${TERMS_INDEX_UID}=${termsStats.numberOfDocuments} docs`,
+  );
+
   const trustScoresEnabled = process.env.FETCH_TRUST_SCORES === 'true';
   let trustClientConnected = false;
 

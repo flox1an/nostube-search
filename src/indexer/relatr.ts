@@ -10,7 +10,7 @@
  * Server identity (from nostube/src/nostr/contextvm.ts):
  *   npub: npub16w48u4xvtlp7ywgfsjlud74tlgdfx9s33scdlafmgl3a40n9tthsu6ty8g
  *   hex:  d3aa7e54cc5fc3e2390984bfc6faabfa1a9316118c30dff53b47e3dabe655aef
- *   relay: wss://relay.contextvm.org
+ *   relay: wss://relay2.contextvm.org
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -19,7 +19,7 @@ import { nip19 } from 'nostr-tools';
 import { getMany, setMany } from './trust-cache.js';
 
 const SERVER_NPUB = 'npub16w48u4xvtlp7ywgfsjlud74tlgdfx9s33scdlafmgl3a40n9tthsu6ty8g';
-const CONTEXTVM_RELAYS = ['wss://relay.contextvm.org', 'wss://relay2.contextvm.org'];
+const CONTEXTVM_RELAYS = ['wss://relay2.contextvm.org'];
 
 // Decode server npub to hex once at module load
 const decoded = nip19.decode(SERVER_NPUB);

@@ -323,16 +323,29 @@ function sourceRelaysFromEnv(): string[] {
 
 async function findVideoByRef(videoRef: string): Promise<SearchHit | null> {
   const lookup = parseVideoRef(videoRef)
-  const filter = lookup.type === 'event'
-    ? [`event_id = ${quoteFilterValue(lookup.eventId)}`]
-    : [
-        `kind = ${lookup.kind}`,
-        `pubkey = ${quoteFilterValue(lookup.pubkey)}`,
-        `identifier = ${quoteFilterValue(lookup.identifier)}`,
-      ]
 
-  const result = await meiliSearch({ q: '', limit: 1, offset: 0, filter })
-  return result.hits[0] ?? await fetchVideoFromRelayHints(lookup)
+  if (lookup.type === 'event') {
+    const filter = [`event_id = ${quoteFilterValue(lookup.eventId)}`]
+    const result = await meiliSearch({ q: '', limit: 1, offset: 0, filter })
+    return result.hits[0] ?? await fetchVideoFromRelayHints(lookup)
+  }
+
+  // Try identifier first (current schema), then d_tag (pre-June-2 schema)
+  const identifierFilter = [
+    `kind = ${lookup.kind}`,
+    `pubkey = ${quoteFilterValue(lookup.pubkey)}`,
+    `identifier = ${quoteFilterValue(lookup.identifier)}`,
+  ]
+  const byIdentifier = await meiliSearch({ q: '', limit: 1, offset: 0, filter: identifierFilter })
+  if (byIdentifier.hits[0]) return byIdentifier.hits[0]
+
+  const dTagFilter = [
+    `kind = ${lookup.kind}`,
+    `pubkey = ${quoteFilterValue(lookup.pubkey)}`,
+    `d_tag = ${quoteFilterValue(lookup.identifier)}`,
+  ]
+  const byDTag = await meiliSearch({ q: '', limit: 1, offset: 0, filter: dTagFilter })
+  return byDTag.hits[0] ?? await fetchVideoFromRelayHints(lookup)
 }
 
 function firstTagValue(tags: string[][], tagName: string): string | null {
@@ -473,8 +486,11 @@ function recommendationQuery(source: SearchHit): string {
 }
 
 function candidateFilters(source: SearchHit): string[] {
-  if (source.isShort) return ['isShort = true']
-  if (source.isVideo) return ['isVideo = true']
+  // Derive candidate type from kind (always present) rather than isVideo/isShort
+  // which may not be set on documents indexed before the June-2026 schema update.
+  const kind = source.kind ?? 0
+  if (kind === 22 || kind === 34236) return ['(kind = 22 OR kind = 34236)']
+  if (kind === 21 || kind === 34235) return ['(kind = 21 OR kind = 34235)']
   if (source.mediaType) return [`mediaType = ${quoteFilterValue(source.mediaType)}`]
   return []
 }
@@ -596,11 +612,13 @@ async function relatedVideos(input: {
   if (!source) return null
 
   const candidateLimit = Math.max(input.limit * 4, input.limit)
-  const result = await meiliSearch({
+  const typeFilters = candidateFilters(source)
+
+  let result = await meiliSearch({
     q: recommendationQuery(source),
     limit: candidateLimit,
     offset: 0,
-    filter: candidateFilters(source),
+    filter: typeFilters,
     showRankingScore: true,
   })
 
@@ -608,7 +626,23 @@ async function relatedVideos(input: {
   const profile = userPubkey ? await getUserRecommendationProfile(userPubkey) : null
   const loggedIn = Boolean(profile)
 
-  const ranked = filterAndDedupeCandidates(source, result.hits ?? [], input.excludeContentWarnings)
+  let candidates = filterAndDedupeCandidates(source, result.hits ?? [], input.excludeContentWarnings)
+
+  // Fallback: if no candidates remain after deduplication (e.g. source is the only
+  // match, or has niche/foreign-language content), serve popular videos of the same type.
+  if (candidates.length === 0) {
+    result = await meiliSearch({
+      q: '',
+      limit: candidateLimit,
+      offset: 0,
+      filter: typeFilters,
+      sort: ['rankingScore:desc'],
+      showRankingScore: true,
+    })
+    candidates = filterAndDedupeCandidates(source, result.hits ?? [], input.excludeContentWarnings)
+  }
+
+  const ranked = candidates
     .map(candidate => {
       const score = scoreRecommendation({
         candidate,

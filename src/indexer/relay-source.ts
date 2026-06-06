@@ -22,46 +22,47 @@ export function sourceRelaysFromEnv(): string[] {
 }
 
 export async function fetchVideoEventsSince(relays: string[], since: number): Promise<Event[]> {
-  const pool = new SimplePool({ enablePing: false, enableReconnect: false });
-  const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
   const seen = new Map<string, Event>();
+  const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
 
-  try {
-    let until: number | undefined;
+  for (const relay of relays) {
+    const pool = new SimplePool({ enablePing: false, enableReconnect: false });
+    try {
+      let until: number | undefined;
 
-    for (;;) {
-      const events = await pool.querySync(
-        relays,
-        { kinds: VIDEO_KINDS, since, limit: PAGE_SIZE, ...(until !== undefined ? { until } : {}) },
-        { maxWait, label: 'nostube-search-incremental' },
-      );
+      for (;;) {
+        const events = await pool.querySync(
+          [relay],
+          { kinds: VIDEO_KINDS, since, limit: PAGE_SIZE, ...(until !== undefined ? { until } : {}) },
+          { maxWait, label: 'nostube-search-incremental' },
+        );
 
-      if (events.length === 0) break;
-      for (const e of events) seen.set(e.id, e);
-      if (events.length < PAGE_SIZE) break;
+        if (events.length === 0) break;
+        for (const e of events) seen.set(e.id, e);
+        if (events.length < PAGE_SIZE) break;
 
-      const minTs = Math.min(...events.map(e => e.created_at)) - 1;
-      if (minTs <= since) break;
-      until = minTs;
+        const minTs = Math.min(...events.map(e => e.created_at)) - 1;
+        if (minTs <= since) break;
+        until = minTs;
+      }
+    } finally {
+      pool.destroy();
     }
-
-    return Array.from(seen.values()).sort((a, b) => a.created_at - b.created_at);
-  } finally {
-    pool.destroy();
   }
+
+  return Array.from(seen.values()).sort((a, b) => a.created_at - b.created_at);
 }
 
-export async function fetchAllVideoEvents(relays: string[]): Promise<Event[]> {
+async function fetchAllVideoEventsFromRelay(relay: string, seen: Map<string, Event>): Promise<void> {
   const pool = new SimplePool({ enablePing: false, enableReconnect: false });
   const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
-  const seen = new Map<string, Event>();
 
   try {
     let until: number | undefined;
 
     for (;;) {
       const events = await pool.querySync(
-        relays,
+        [relay],
         { kinds: VIDEO_KINDS, limit: PAGE_SIZE, ...(until !== undefined ? { until } : {}) },
         { maxWait, label: 'nostube-search-videos' },
       );
@@ -69,18 +70,36 @@ export async function fetchAllVideoEvents(relays: string[]): Promise<Event[]> {
       if (events.length === 0) break;
 
       for (const e of events) seen.set(e.id, e);
-      console.log(`[RelaySource] Fetched page: ${events.length} events (total so far: ${seen.size})`);
+      console.log(`[RelaySource] ${relay}: page ${events.length} events (total unique so far: ${seen.size})`);
 
       if (events.length < PAGE_SIZE) break;
 
       until = Math.min(...events.map(e => e.created_at)) - 1;
     }
-
-    // Sort ascending by created_at to match the previous ORDER BY created_at ASC behaviour
-    return Array.from(seen.values()).sort((a, b) => a.created_at - b.created_at);
   } finally {
     pool.destroy();
   }
+}
+
+export async function fetchAllVideoEvents(relays: string[]): Promise<Event[]> {
+  const seen = new Map<string, Event>();
+
+  // Query each relay individually so pagination terminates correctly per-relay.
+  // A multi-relay combined query breaks early once the deduped page falls below
+  // PAGE_SIZE, even though individual relays still have more events to offer.
+  for (const relay of relays) {
+    await fetchAllVideoEventsFromRelay(relay, seen);
+  }
+
+  return Array.from(seen.values()).sort((a, b) => a.created_at - b.created_at);
+}
+
+const RELATION_FILTER_CHUNK_SIZE = 50;
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
+  return chunks;
 }
 
 export async function fetchRelationCountsForBatch(
@@ -106,16 +125,19 @@ export async function fetchRelationCountsForBatch(
   const aTags = Array.from(aTagToEventId.keys());
 
   try {
-    const [eTagEvents, aTagEvents] = await Promise.all([
-      pool.querySync(relays, { kinds: RELATION_KINDS, '#e': eventIds }, { maxWait }),
-      aTags.length > 0
-        ? pool.querySync(relays, { kinds: RELATION_KINDS, '#a': aTags }, { maxWait })
-        : Promise.resolve([] as Event[]),
+    const eTagChunks = chunkArray(eventIds, RELATION_FILTER_CHUNK_SIZE);
+    const aTagChunks = chunkArray(aTags, RELATION_FILTER_CHUNK_SIZE);
+
+    const allChunkResults = await Promise.all([
+      ...eTagChunks.map(chunk => pool.querySync(relays, { kinds: RELATION_KINDS, '#e': chunk }, { maxWait })),
+      ...aTagChunks.map(chunk => pool.querySync(relays, { kinds: RELATION_KINDS, '#a': chunk }, { maxWait })),
     ]);
 
     // Deduplicate relation events by their own ID
     const allRelationEvents = new Map<string, Event>();
-    for (const e of [...eTagEvents, ...aTagEvents]) allRelationEvents.set(e.id, e);
+    for (const events of allChunkResults) {
+      for (const e of events) allRelationEvents.set(e.id, e);
+    }
 
     const counts = new Map<string, EventRelationCounts>();
 
