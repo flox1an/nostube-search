@@ -474,15 +474,15 @@ async function fetchVideoFromRelayHintsUncached(lookup: VideoLookup): Promise<Se
 }
 
 function recommendationQuery(source: SearchHit): string {
-  return [
-    source.title,
-    ...(Array.isArray(source.tags) ? source.tags : []),
-    source.summary,
-    source.content_preview,
-  ]
+  const tags = Array.isArray(source.tags) ? source.tags : []
+  // Repeat title + tags so MeiliSearch gives them more signal weight; secondary
+  // content is capped so content_preview noise doesn't dilute the primary terms.
+  const primary = [source.title, ...tags, source.title, ...tags].filter(Boolean).join(' ')
+  const secondary = [source.summary, source.content_preview]
     .filter(Boolean)
     .join(' ')
-    .slice(0, 600)
+    .slice(0, 150)
+  return [primary, secondary].filter(Boolean).join(' ').slice(0, 600)
 }
 
 function candidateFilters(source: SearchHit): string[] {
@@ -631,8 +631,12 @@ async function relatedVideos(input: {
 
   const allHits: SearchHit[] = [...(simResult.hits ?? [])]
 
-  // Stage 2: if the similarity search came up short, pull in more videos from the
-  // same author so their other work always appears in the sidebar.
+  // Stage 2: if the similarity search came up short, pull in a few videos from the
+  // same author so their other work can appear in the sidebar. Capped to ~30% of the
+  // requested limit so stage 3 (popular/diverse) always has room to contribute — without
+  // this cap an unindexed source video would fill the entire result set with same-author
+  // content and stage 3 would never fire.
+  const authorBackfillLimit = Math.max(2, Math.ceil(input.limit * 0.4))
   if (allHits.length < candidateLimit && source.pubkey) {
     const authorFilters = [
       `pubkey = ${quoteFilterValue(source.pubkey)}`,
@@ -640,7 +644,7 @@ async function relatedVideos(input: {
     ]
     const authorResult = await meiliSearch({
       q: '',
-      limit: candidateLimit,
+      limit: authorBackfillLimit,
       offset: 0,
       filter: authorFilters,
       sort: ['rankingScore:desc'],
@@ -667,7 +671,7 @@ async function relatedVideos(input: {
     candidates = filterAndDedupeCandidates(source, allHits, input.excludeContentWarnings)
   }
 
-  const ranked = candidates
+  const sorted = candidates
     .map(candidate => {
       const score = scoreRecommendation({
         candidate,
@@ -680,7 +684,27 @@ async function relatedVideos(input: {
       return { candidate, score }
     })
     .sort((a, b) => b.score - a.score)
-    .slice(0, input.limit)
+
+  // Diversity pass: limit same-source-author videos to ~30% of results so unindexed
+  // videos with no similarity signal don't flood the list with one author's content.
+  const maxSameAuthor = Math.max(2, Math.floor(input.limit * 0.3))
+  const ranked: typeof sorted = []
+  const deferred: typeof sorted = []
+  let sameAuthorCount = 0
+  for (const item of sorted) {
+    if (ranked.length >= input.limit) break
+    if (item.candidate.pubkey === source.pubkey && sameAuthorCount >= maxSameAuthor) {
+      deferred.push(item)
+    } else {
+      if (item.candidate.pubkey === source.pubkey) sameAuthorCount++
+      ranked.push(item)
+    }
+  }
+  // Fill any remaining slots with deferred same-author candidates
+  for (const item of deferred) {
+    if (ranked.length >= input.limit) break
+    ranked.push(item)
+  }
 
   return ranked.map(({ candidate, score }) => mapRecommendationHit(candidate as RecommendationSearchHit, score))
 }
