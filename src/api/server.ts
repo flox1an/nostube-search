@@ -614,7 +614,10 @@ async function relatedVideos(input: {
   const candidateLimit = Math.max(input.limit * 4, input.limit)
   const typeFilters = candidateFilters(source)
 
-  let result = await meiliSearch({
+  // Stage 1: similarity search — MeiliSearch stops at the first term combination
+  // that finds any results (matchingStrategy "last"), so niche/foreign content
+  // may only yield a handful of hits.
+  const simResult = await meiliSearch({
     q: recommendationQuery(source),
     limit: candidateLimit,
     offset: 0,
@@ -626,12 +629,33 @@ async function relatedVideos(input: {
   const profile = userPubkey ? await getUserRecommendationProfile(userPubkey) : null
   const loggedIn = Boolean(profile)
 
-  let candidates = filterAndDedupeCandidates(source, result.hits ?? [], input.excludeContentWarnings)
+  const allHits: SearchHit[] = [...(simResult.hits ?? [])]
 
-  // Fallback: if no candidates remain after deduplication (e.g. source is the only
-  // match, or has niche/foreign-language content), serve popular videos of the same type.
-  if (candidates.length === 0) {
-    result = await meiliSearch({
+  // Stage 2: if the similarity search came up short, pull in more videos from the
+  // same author so their other work always appears in the sidebar.
+  if (allHits.length < candidateLimit && source.pubkey) {
+    const authorFilters = [
+      `pubkey = ${quoteFilterValue(source.pubkey)}`,
+      ...typeFilters,
+    ]
+    const authorResult = await meiliSearch({
+      q: '',
+      limit: candidateLimit,
+      offset: 0,
+      filter: authorFilters,
+      sort: ['rankingScore:desc'],
+      showRankingScore: true,
+    })
+    // Strip _rankingScore so fill candidates are scored by tag/token overlap,
+    // not by MeiliSearch's empty-query score of 1.0.
+    for (const hit of authorResult.hits ?? []) allHits.push({ ...hit, _rankingScore: undefined })
+  }
+
+  let candidates = filterAndDedupeCandidates(source, allHits, input.excludeContentWarnings)
+
+  // Stage 3: if still under limit, pad with popular videos of the same type.
+  if (candidates.length < input.limit) {
+    const popularResult = await meiliSearch({
       q: '',
       limit: candidateLimit,
       offset: 0,
@@ -639,7 +663,8 @@ async function relatedVideos(input: {
       sort: ['rankingScore:desc'],
       showRankingScore: true,
     })
-    candidates = filterAndDedupeCandidates(source, result.hits ?? [], input.excludeContentWarnings)
+    for (const hit of popularResult.hits ?? []) allHits.push({ ...hit, _rankingScore: undefined })
+    candidates = filterAndDedupeCandidates(source, allHits, input.excludeContentWarnings)
   }
 
   const ranked = candidates
