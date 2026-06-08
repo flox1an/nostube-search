@@ -122,7 +122,6 @@ const FEATURE_FILTERS = new Map([
   ['hd', 'isHd = true'],
   ['nostr', 'isNostrNative = true'],
 ])
-const EXCLUDE_UNAVAILABLE_MEDIA_FILTER = 'availabilityStatus != "unavailable"'
 const SEARCHABLE_VIDEO_KINDS = new Set([21, 22, 34235, 34236])
 
 function toInt(input: string | undefined, fallback: number): number {
@@ -202,7 +201,7 @@ function parseSearchFilters(query: {
   if (query.available === 'true') {
     filters.push('hasPlayableMedia = true')
   } else if (query.available === 'exclude-unavailable') {
-    filters.push(EXCLUDE_UNAVAILABLE_MEDIA_FILTER)
+    filters.push('availabilityStatus != "unavailable"')
   }
 
   const kindFilter = parseKindFilters(query.kinds)
@@ -516,7 +515,11 @@ function candidateFilters(source: SearchHit): string[] {
 }
 
 function recommendationCandidateFilters(source: SearchHit): string[] {
-  return [...candidateFilters(source), EXCLUDE_UNAVAILABLE_MEDIA_FILTER]
+  return candidateFilters(source)
+}
+
+function excludeKnownUnavailableHits(hits: SearchHit[]): SearchHit[] {
+  return hits.filter(hit => hit.availabilityStatus !== 'unavailable')
 }
 
 function addressKey(hit: SearchHit): string | null {
@@ -695,7 +698,7 @@ async function relatedVideos(input: {
     candidates = filterAndDedupeCandidates(source, allHits, input.excludeContentWarnings)
   }
 
-  const sorted = candidates
+  const sorted = excludeKnownUnavailableHits(candidates)
     .map(candidate => {
       const score = scoreRecommendation({
         candidate,
@@ -772,8 +775,8 @@ app.get('/api/search/suggest', async c => {
   if (!q) return c.json({ suggestions: [] })
 
   try {
-    const result = await meiliSearch({ q, limit: 5, offset: 0, filter: [EXCLUDE_UNAVAILABLE_MEDIA_FILTER] })
-    const suggestions = [...new Set((result.hits ?? []).map(hit => (hit.title ?? '').trim()).filter(Boolean))]
+    const result = await meiliSearch({ q, limit: 10, offset: 0 })
+    const suggestions = [...new Set(excludeKnownUnavailableHits(result.hits ?? []).map(hit => (hit.title ?? '').trim()).filter(Boolean))]
       .slice(0, 5)
     return c.json({ suggestions })
   } catch {
