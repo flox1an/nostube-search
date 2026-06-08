@@ -550,7 +550,10 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
       'identifier', 'd_tag', 'mediaAvailabilityKey', 'availabilityStatus', 'hasPlayableMedia',
       'mediaCheckedAt', 'mediaRetryAfter',
     ],
-    sortableAttributes: ['rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration'],
+    sortableAttributes: [
+      'rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration',
+      'mediaCheckedAt', 'mediaRetryAfter',
+    ],
     rankingRules: [
       'words', 'typo', 'proximity', 'attribute', 'exactness', 'sort',
       'rankingScore:desc', 'created_at:desc',
