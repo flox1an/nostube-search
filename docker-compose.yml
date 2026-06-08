@@ -19,34 +19,34 @@ services:
   # Incremental update every 10 min, full re-index every 24 h.
   # Full re-index uses a rolling swap (videos_next → videos) so the API stays
   # available throughout.
-  # api:
-  #   image: ghcr.io/flox1an/nostube-search:latest
-  #   container_name: nostube-api
-  #   ports:
-  #     - "${API_PORT:-3001}:3001"
-  #   environment:
-  #     PORT: 3001
-  #     MEILI_URL: http://meilisearch:7700
-  #     MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
-  #     NOSTR_SOURCE_RELAYS: ${NOSTR_SOURCE_RELAYS:-wss://relay.nostu.be}
-  #     NOSTR_INDEX_RELAYS: ${NOSTR_INDEX_RELAYS:-wss://relay.nostu.be}
-  #     NOSTR_SOURCE_MAX_WAIT_MS: ${NOSTR_SOURCE_MAX_WAIT_MS:-30000}
-  #     FETCH_TRUST_SCORES: ${FETCH_TRUST_SCORES:-true}
-  #     PROFILE_CACHE_PATH: /data/cache/.profile-cache.json
-  #     PROFILE_CACHE_TTL_MS: ${PROFILE_CACHE_TTL_MS:-86400000}
-  #     BLOSSOM_LIST_CACHE_DIR: /data/cache/blossom-lists
-  #     BLOSSOM_LIST_CACHE_TTL_MS: ${BLOSSOM_LIST_CACHE_TTL_MS:-86400000}
-  #     TRUST_CACHE_PATH: /data/cache/.trust-cache.json
-  #     TRUST_CACHE_TTL_MS: ${TRUST_CACHE_TTL_MS:-86400000}
-  #     INDEXER_STATE_PATH: /data/cache/.indexer-state.json
-  #     INDEXER_INCREMENTAL_INTERVAL_MS: ${INDEXER_INCREMENTAL_INTERVAL_MS:-600000}
-  #     INDEXER_FULL_INTERVAL_MS: ${INDEXER_FULL_INTERVAL_MS:-86400000}
-  #     CORS_ORIGIN: ${CORS_ORIGIN:-}
-  #   volumes:
-  #     - api_cache:/data/cache
-  #   depends_on:
-  #     - meilisearch
-  #   restart: unless-stopped
+  api:
+    image: ghcr.io/flox1an/nostube-search:latest
+    container_name: nostube-api
+    ports:
+      - "${API_PORT:-3001}:3001"
+    environment:
+      PORT: 3001
+      MEILI_URL: http://meilisearch:7700
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      NOSTR_SOURCE_RELAYS: ${NOSTR_SOURCE_RELAYS:-wss://relay.nostu.be}
+      NOSTR_INDEX_RELAYS: ${NOSTR_INDEX_RELAYS:-wss://relay.nostu.be}
+      NOSTR_SOURCE_MAX_WAIT_MS: ${NOSTR_SOURCE_MAX_WAIT_MS:-30000}
+      FETCH_TRUST_SCORES: ${FETCH_TRUST_SCORES:-true}
+      PROFILE_CACHE_PATH: /data/cache/.profile-cache.json
+      PROFILE_CACHE_TTL_MS: ${PROFILE_CACHE_TTL_MS:-86400000}
+      BLOSSOM_LIST_CACHE_DIR: /data/cache/blossom-lists
+      BLOSSOM_LIST_CACHE_TTL_MS: ${BLOSSOM_LIST_CACHE_TTL_MS:-86400000}
+      TRUST_CACHE_PATH: /data/cache/.trust-cache.json
+      TRUST_CACHE_TTL_MS: ${TRUST_CACHE_TTL_MS:-86400000}
+      INDEXER_STATE_PATH: /data/cache/.indexer-state.json
+      INDEXER_INCREMENTAL_INTERVAL_MS: ${INDEXER_INCREMENTAL_INTERVAL_MS:-600000}
+      INDEXER_FULL_INTERVAL_MS: ${INDEXER_FULL_INTERVAL_MS:-86400000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+    volumes:
+      - api_cache:/data/cache
+    depends_on:
+      - meilisearch
+    restart: unless-stopped
 
   # ── MeiliSearch Web UI ────────────────────────────────────────────────────────
   meilisearch-ui:
@@ -61,4 +61,4 @@ services:
 
 volumes:
   meilisearch_data:
-  # api_cache:
+  api_cache:

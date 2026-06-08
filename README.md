@@ -137,12 +137,6 @@ Copy `.env.example` to `.env` and adjust as needed.
 |----------|-------------|
 | `MEILI_MASTER_KEY` | MeiliSearch master key. Use a strong random value in production. |
 
-### Data & storage
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATA_PATH` | `./data` | Host path for all persistent data. Contains `meilisearch/` (index) and `cache/` (JSON caches). Set to an absolute path when using Coolify named volumes. |
-
 ### API service
 
 | Variable | Default | Description |
@@ -165,9 +159,9 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `NOSTR_INDEX_RELAYS` | `wss://relay.nostu.be` | Comma-separated relay URLs used to fetch author kind-0 profile events. |
 | `NOSTR_SOURCE_MAX_WAIT_MS` | `30000` | Per-query timeout when fetching from source relays (ms). |
 | `FETCH_TRUST_SCORES` | `true` | Set to `false` to skip ContextVM/relatr trust score lookups (all authors get score 0.5). |
-| `PROFILE_CACHE_TTL_MS` | `86400000` | Author profile cache TTL (ms, default 24 h). Stored at `DATA_PATH/cache/.profile-cache.json`. |
-| `BLOSSOM_LIST_CACHE_TTL_MS` | `86400000` | Author Blossom server-list cache TTL (ms, default 24 h). Stored as one file per author under `DATA_PATH/cache/blossom-lists/<npub>.json`. |
-| `TRUST_CACHE_TTL_MS` | `86400000` | Trust score cache TTL (ms, default 24 h). Stored at `DATA_PATH/cache/.trust-cache.json`. |
+| `PROFILE_CACHE_TTL_MS` | `86400000` | Author profile cache TTL (ms, default 24 h). Stored at `/data/cache/.profile-cache.json` in the `api_cache` volume. |
+| `BLOSSOM_LIST_CACHE_TTL_MS` | `86400000` | Author Blossom server-list cache TTL (ms, default 24 h). Stored as one file per author under `/data/cache/blossom-lists/<npub>.json` in the `api_cache` volume. |
+| `TRUST_CACHE_TTL_MS` | `86400000` | Trust score cache TTL (ms, default 24 h). Stored at `/data/cache/.trust-cache.json` in the `api_cache` volume. |
 | `INDEXER_INCREMENTAL_INTERVAL_MS` | `600000` | How often the indexer fetches and upserts new events (ms, default 10 min). |
 | `INDEXER_FULL_INTERVAL_MS` | `86400000` | How often a full re-index runs (ms, default 24 h). Uses a rolling index swap — the live index stays queryable throughout. |
 
@@ -177,28 +171,48 @@ Copy `.env.example` to `.env` and adjust as needed.
 
 1. Add this repository as a **Docker Compose** application in Coolify.
 2. Set the environment variables in Coolify's env UI (at minimum `MEILI_MASTER_KEY`).
-3. Set `DATA_PATH` to a Coolify-managed persistent volume path, e.g. `/data/nostube-search`.
-4. Deploy — Coolify starts all three services: `meilisearch`, `api`, and `indexer`.
+3. Deploy — Coolify starts `meilisearch`, `api`, and `meilisearch-ui`.
 
 The indexer runs a full re-index on first boot and then self-schedules. No manual trigger needed.
 
+### Automatic deployment from GitHub Actions
+
+The Docker workflow builds and pushes `ghcr.io/flox1an/nostube-search:latest` on pushes to `main`, then triggers a Coolify deployment webhook. Pull requests still build the image for validation, but do not push or deploy.
+
+If Coolify is only reachable inside Tailscale, the deployment job must run from inside that Tailnet. Register a GitHub self-hosted runner on a machine that can reach the Coolify URL, and give it a `tailscale` label. The workflow keeps the Docker build on GitHub-hosted runners, then runs only the webhook call on `[self-hosted, tailscale]`.
+
+In Coolify:
+
+1. Enable API access under **Settings → Configuration → Advanced**.
+2. Create an API token with deploy permission.
+3. Open this Docker Compose resource's **Webhook** page and copy the deploy webhook URL.
+
+In GitHub repository secrets, add:
+
+| Secret | Value |
+|--------|-------|
+| `COOLIFY_WEBHOOK` | The Coolify deploy webhook URL reachable from the Tailscale runner |
+| `COOLIFY_TOKEN` | The Coolify API token with deploy permission |
+
+Coolify pulls the prebuilt API image from GHCR because the `api` service uses `image: ghcr.io/flox1an/nostube-search:latest`. The MeiliSearch services remain pinned to their own upstream images and are not rebuilt by this repository workflow.
+
 ### Exposing MeiliSearch (optional)
 
-By default MeiliSearch is only reachable inside the Docker network. To expose it for debugging, uncomment the `ports:` block in `docker-compose.yml` under the `meilisearch` service and set `MEILI_ENV=development`.
+This compose file publishes MeiliSearch on `${MEILI_PORT:-7700}`. Keep a strong `MEILI_MASTER_KEY` in production, and remove the `ports:` block under `meilisearch` if you want it reachable only from the Docker network. Set `MEILI_ENV=development` only when you need the MeiliSearch dashboard for debugging.
 
 ---
 
 ## Data directory layout
 
 ```
-DATA_PATH/
-├── meilisearch/
+Docker volumes:
+├── meilisearch_data/
 │   └── data.ms/              ← MeiliSearch indexes (videos, terms, media_availability)
-└── cache/
+└── api_cache/
     ├── .indexer-state.json   ← Scheduler timestamps (lastIncrementalAt, lastFullAt)
     ├── .profile-cache.json   ← Author profile cache
     ├── blossom-lists/         ← Author kind-10063 Blossom server-list cache
     └── .trust-cache.json     ← Trust score cache
 ```
 
-All files are created automatically on first run. Back up `DATA_PATH/meilisearch/` to preserve the index.
+All files are created automatically on first run. Back up the `meilisearch_data` Docker volume to preserve the index.
