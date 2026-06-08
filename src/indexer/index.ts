@@ -11,10 +11,20 @@ import {
   computeVideoMetadataCompleteness,
   type AuthorProfile,
 } from './scoring.js';
+import {
+  ensureMediaAvailabilityIndex,
+  fetchAvailabilityByKeys,
+  MEDIA_AVAILABILITY_INDEX_UID,
+  mediaAvailabilityKey,
+  snapshotFromAvailability,
+  type MediaAvailabilityDocument,
+  type MediaAvailabilityStatus,
+} from './media-availability.js';
 import { collectWords, mergeWordCounts } from './words.js';
 import { connectTrustScoreClient, disconnectTrustScoreClient, fetchTrustScores } from './relatr.js';
 import { prune as pruneCache, stats as cacheStats } from './trust-cache.js';
 import { fetchAuthorProfiles, profileCache } from './profiles.js';
+import { blossomListCache } from './blossom-lists.js';
 import {
   sourceRelaysFromEnv,
   fetchAllVideoEvents,
@@ -114,6 +124,12 @@ type SearchDocument = {
   size: number | null;
   hash: string | null;
   fallbackUrls: string[];
+  mediaAvailabilityKey: string | null;
+  availabilityStatus: MediaAvailabilityStatus;
+  hasPlayableMedia: boolean;
+  playableUrl: string | null;
+  mediaCheckedAt: number | null;
+  mediaRetryAfter: number | null;
   contentWarning: string | null;
   textTracks: TextTrack[];
   hasCaptions: boolean;
@@ -389,6 +405,7 @@ function toSearchDocument(
   relationCountsByEventId: Map<string, EventRelationCounts>,
   urlStatsByEventId: Map<string, EventUrlStats>,
   trustScoreByPubkey: Map<string, number>,
+  availabilityByKey: Map<string, MediaAvailabilityDocument>,
 ): SearchDocument {
   const tags = getTags(row.raw_event);
 
@@ -449,6 +466,11 @@ function toSearchDocument(
     notes: relationCounts.notesCount,
   });
   const urlAvailabilityScore = computeUrlAvailabilityScore(urlStats.urlsAvailable, urlStats.urlsTotal);
+  const availabilityKey = mediaAvailabilityKey({ hash: imeta.hash, videoUrl, fallbackUrls: imeta.fallbackUrls });
+  const availability = snapshotFromAvailability(
+    availabilityKey,
+    availabilityKey ? availabilityByKey.get(availabilityKey) : undefined,
+  );
   const rankingScore = computeRankingScore({
     authorProfileCompleteness,
     videoMetadataCompleteness,
@@ -489,6 +511,12 @@ function toSearchDocument(
     size: imeta.size,
     hash: imeta.hash,
     fallbackUrls: imeta.fallbackUrls,
+    mediaAvailabilityKey: availability.mediaAvailabilityKey,
+    availabilityStatus: availability.availabilityStatus,
+    hasPlayableMedia: availability.hasPlayableMedia,
+    playableUrl: availability.playableUrl,
+    mediaCheckedAt: availability.mediaCheckedAt,
+    mediaRetryAfter: availability.mediaRetryAfter,
     contentWarning,
     textTracks,
     hasCaptions: textTracks.length > 0,
@@ -518,7 +546,8 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
     filterableAttributes: [
       'event_id', 'kind', 'pubkey', 'published_at', 'created_at', 'duration', 'hasCaptions',
       'effectivePublishedAt', 'isHd', 'isShort', 'isVideo', 'isNostrNative', 'mediaType',
-      'identifier', 'd_tag',
+      'identifier', 'd_tag', 'mediaAvailabilityKey', 'availabilityStatus', 'hasPlayableMedia',
+      'mediaCheckedAt', 'mediaRetryAfter',
     ],
     sortableAttributes: ['rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration'],
     rankingRules: [
@@ -600,6 +629,7 @@ async function upsertTerms(
 
 async function indexBatch(
   videosIndex: Index,
+  availabilityIndex: Index,
   batchEvents: Event[],
   sourceRelays: string[],
   trustClientConnected: boolean,
@@ -630,9 +660,18 @@ async function indexBatch(
 
   const profileByPubkey = await fetchAuthorProfiles(uniquePubkeys);
   const urlStatsByEventId = new Map<string, EventUrlStats>();
+  const availabilityKeys = rows
+    .map(row => {
+      const tags = getTags(row.raw_event);
+      const imeta = parseImetaTags(tags);
+      const videoUrl = imeta.videoUrl ?? firstTagValue(tags, 'url');
+      return mediaAvailabilityKey({ hash: imeta.hash, videoUrl, fallbackUrls: imeta.fallbackUrls });
+    })
+    .filter((key): key is string => Boolean(key));
+  const availabilityByKey = await fetchAvailabilityByKeys(availabilityIndex, availabilityKeys);
 
   const documents = rows.map(row =>
-    toSearchDocument(row, profileByPubkey, relationCountsByEventId, urlStatsByEventId, trustScoreByPubkey),
+    toSearchDocument(row, profileByPubkey, relationCountsByEventId, urlStatsByEventId, trustScoreByPubkey, availabilityByKey),
   );
 
   const task = await videosIndex.addDocuments(documents);
@@ -664,12 +703,13 @@ async function incrementalUpdate(
   console.log(`[Indexer] Incremental: ${newEvents.length} new events to upsert`);
 
   const videosIndex = client.index(INDEX_UID);
+  const availabilityIndex = client.index(MEDIA_AVAILABILITY_INDEX_UID);
   const allWordCounts = new Map<string, number>();
 
   for (let offset = 0; offset < newEvents.length; offset += BATCH_SIZE) {
     const batchEvents = newEvents.slice(offset, offset + BATCH_SIZE);
     const { wordCounts } = await indexBatch(
-      videosIndex, batchEvents, sourceRelays, trustClientConnected, offset, newEvents.length,
+      videosIndex, availabilityIndex, batchEvents, sourceRelays, trustClientConnected, offset, newEvents.length,
     );
     mergeWordCounts(allWordCounts, wordCounts);
   }
@@ -694,6 +734,7 @@ async function fullReindex(
   // Ensure primary indexes exist so the swap API accepts both sides
   await ensureIndexExists(client, INDEX_UID, 'id', applyVideoIndexSettings);
   await ensureIndexExists(client, TERMS_INDEX_UID, 'id', applyTermsIndexSettings);
+  const availabilityIndex = await ensureMediaAvailabilityIndex(client);
 
   // Clean up orphaned _next indexes from a previously interrupted run
   await deleteIndexIfExists(client, INDEX_NEXT_UID);
@@ -714,7 +755,7 @@ async function fullReindex(
   for (let offset = 0; offset < total; offset += BATCH_SIZE) {
     const batchEvents = allEvents.slice(offset, offset + BATCH_SIZE);
     const { taskUid, wordCounts } = await indexBatch(
-      nextVideosIndex, batchEvents, sourceRelays, trustClientConnected, offset, total,
+      nextVideosIndex, availabilityIndex, batchEvents, sourceRelays, trustClientConnected, offset, total,
     );
     lastVideosTaskUid = taskUid;
     mergeWordCounts(allWordCounts, wordCounts);
@@ -807,6 +848,11 @@ async function main(): Promise<void> {
     const v = Number(process.env.PROFILE_CACHE_TTL_MS);
     if (Number.isFinite(v) && v > 0) profileCache.setCacheTTL(v);
   }
+  if (process.env.BLOSSOM_LIST_CACHE_DIR) blossomListCache.setCacheDir(process.env.BLOSSOM_LIST_CACHE_DIR);
+  if (process.env.BLOSSOM_LIST_CACHE_TTL_MS) {
+    const v = Number(process.env.BLOSSOM_LIST_CACHE_TTL_MS);
+    if (Number.isFinite(v) && v > 0) blossomListCache.setCacheTTL(v);
+  }
   if (process.env.INDEXER_STATE_PATH) setStatePath(process.env.INDEXER_STATE_PATH);
 
   const pruned = pruneCache();
@@ -823,12 +869,20 @@ async function main(): Promise<void> {
     (prunedProfiles > 0 ? `, pruned ${prunedProfiles} expired` : ''),
   );
 
+  const prunedBlossomLists = blossomListCache.prune();
+  const blcs = blossomListCache.stats();
+  console.log(
+    `[BlossomListCache] ${blcs.entries} entries, TTL=${blcs.ttlMs}ms, dir=${blcs.dir}` +
+    (prunedBlossomLists > 0 ? `, pruned ${prunedBlossomLists} expired` : ''),
+  );
+
   const sourceRelays = sourceRelaysFromEnv();
   console.log(`[Indexer] Source relays: ${sourceRelays.join(', ')}`);
 
   const client = new MeiliSearch({ host: meiliUrl, apiKey: meiliMasterKey });
   await ensureIndexExists(client, INDEX_UID, 'id', applyVideoIndexSettings);
   await ensureIndexExists(client, TERMS_INDEX_UID, 'id', applyTermsIndexSettings);
+  await ensureMediaAvailabilityIndex(client);
 
   const [videosStats, termsStats] = await Promise.all([
     client.index(INDEX_UID).getStats(),

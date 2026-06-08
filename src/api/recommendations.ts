@@ -21,6 +21,9 @@ export type RecommendationSearchHit = {
   thumbnailBlurhash?: string | null;
   videoUrl?: string | null;
   fallbackUrls?: string[];
+  availabilityStatus?: 'unknown' | 'available' | 'unavailable' | 'error';
+  hasPlayableMedia?: boolean;
+  playableUrl?: string | null;
   mediaType?: 'video' | 'audio' | null;
   contentWarning?: string | null;
   rankingScore?: number;
@@ -347,8 +350,11 @@ export function mapRecommendationHit(hit: RecommendationSearchHit, recommendatio
   const pubkey = hit.pubkey ?? '';
   const thumbnail = hit.thumbnail ?? null;
   const videoUrl = hit.videoUrl ?? null;
+  const playableUrl = hit.playableUrl ?? null;
   const fallbackUrls = Array.isArray(hit.fallbackUrls) ? hit.fallbackUrls : [];
-  const urls = [videoUrl, ...fallbackUrls].filter((url): url is string => Boolean(url));
+  const urls = [playableUrl, videoUrl, ...fallbackUrls]
+    .filter((url): url is string => Boolean(url))
+    .filter((url, index, all) => all.indexOf(url) === index);
   const thumbnailVariants = thumbnail
     ? [{
         url: thumbnail,

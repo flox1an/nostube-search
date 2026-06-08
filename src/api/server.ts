@@ -50,6 +50,12 @@ type SearchHit = {
   size?: number | null
   hash?: string | null
   fallbackUrls?: string[]
+  mediaAvailabilityKey?: string | null
+  availabilityStatus?: 'unknown' | 'available' | 'unavailable' | 'error'
+  hasPlayableMedia?: boolean
+  playableUrl?: string | null
+  mediaCheckedAt?: number | null
+  mediaRetryAfter?: number | null
   contentWarning?: string | null
   textTracks?: Array<{ url?: string; lang?: string | null }>
   hasCaptions?: boolean
@@ -116,6 +122,7 @@ const FEATURE_FILTERS = new Map([
   ['hd', 'isHd = true'],
   ['nostr', 'isNostrNative = true'],
 ])
+const EXCLUDE_UNAVAILABLE_MEDIA_FILTER = 'availabilityStatus != "unavailable"'
 const SEARCHABLE_VIDEO_KINDS = new Set([21, 22, 34235, 34236])
 
 function toInt(input: string | undefined, fallback: number): number {
@@ -173,6 +180,7 @@ function parseSearchFilters(query: {
   type?: string
   duration?: string
   date?: string
+  available?: string
   feature?: string | string[]
   kinds?: string | string[]
 }): string[] {
@@ -190,6 +198,12 @@ function parseSearchFilters(query: {
 
   const dateFilter = parseDateFilter(query.date)
   if (dateFilter) filters.push(dateFilter)
+
+  if (query.available === 'true') {
+    filters.push('hasPlayableMedia = true')
+  } else if (query.available === 'exclude-unavailable') {
+    filters.push(EXCLUDE_UNAVAILABLE_MEDIA_FILTER)
+  }
 
   const kindFilter = parseKindFilters(query.kinds)
   if (kindFilter) filters.push(kindFilter)
@@ -279,6 +293,12 @@ function mapHit(hit: SearchHit) {
     size: hit.size ?? null,
     hash: hit.hash ?? null,
     fallbackUrls: Array.isArray(hit.fallbackUrls) ? hit.fallbackUrls : [],
+    mediaAvailabilityKey: hit.mediaAvailabilityKey ?? null,
+    availabilityStatus: hit.availabilityStatus ?? 'unknown',
+    hasPlayableMedia: hit.hasPlayableMedia ?? false,
+    playableUrl: hit.playableUrl ?? null,
+    mediaCheckedAt: hit.mediaCheckedAt ?? null,
+    mediaRetryAfter: hit.mediaRetryAfter ?? null,
     origins: Array.isArray(hit.origins) ? hit.origins : [],
   }
 }
@@ -495,6 +515,10 @@ function candidateFilters(source: SearchHit): string[] {
   return []
 }
 
+function recommendationCandidateFilters(source: SearchHit): string[] {
+  return [...candidateFilters(source), EXCLUDE_UNAVAILABLE_MEDIA_FILTER]
+}
+
 function addressKey(hit: SearchHit): string | null {
   const identifier = hit.identifier ?? hit.d_tag
   if (!hit.kind || !hit.pubkey || !identifier) return null
@@ -612,7 +636,7 @@ async function relatedVideos(input: {
   if (!source) return null
 
   const candidateLimit = Math.max(input.limit * 4, input.limit)
-  const typeFilters = candidateFilters(source)
+  const typeFilters = recommendationCandidateFilters(source)
 
   // Stage 1: similarity search — MeiliSearch stops at the first term combination
   // that finds any results (matchingStrategy "last"), so niche/foreign content
@@ -720,6 +744,7 @@ app.get('/api/search', async c => {
     type: c.req.query('type'),
     duration: c.req.query('duration'),
     date: c.req.query('date'),
+    available: c.req.query('available'),
     feature: c.req.queries('feature') ?? c.req.query('feature'),
     kinds: c.req.queries('kinds') ?? c.req.query('kinds'),
   })
@@ -747,7 +772,7 @@ app.get('/api/search/suggest', async c => {
   if (!q) return c.json({ suggestions: [] })
 
   try {
-    const result = await meiliSearch({ q, limit: 5, offset: 0 })
+    const result = await meiliSearch({ q, limit: 5, offset: 0, filter: [EXCLUDE_UNAVAILABLE_MEDIA_FILTER] })
     const suggestions = [...new Set((result.hits ?? []).map(hit => (hit.title ?? '').trim()).filter(Boolean))]
       .slice(0, 5)
     return c.json({ suggestions })

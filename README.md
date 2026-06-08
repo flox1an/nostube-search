@@ -9,7 +9,7 @@ Nostr video search engine — MeiliSearch-backed API with a built-in web UI.
                   ↓
              MeiliSearch container (internal :7700)
                   ↓
-             ./data/meilisearch/   ← persistent index
+             ./data/meilisearch/   ← persistent indexes
              ./data/cache/         ← profile & trust-score caches
 ```
 
@@ -53,6 +53,7 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 | `kinds` | — | Comma-separated or repeatable Nostr video event kinds. Supported: `21`, `22`, `34235`, `34236` |
 | `duration` | `any` | One of: `any`, `short` (`<180s`), `medium` (`180s..1200s`), `long` (`>1200s`) |
 | `date` | `any` | One of: `any`, `today`, `week`, `month`, `year`; based on `published_at ?? created_at` |
+| `available` | — | Optional media availability filter. Use `true` for only verified playable media, or `exclude-unavailable` to hide known-broken media while keeping unchecked videos. |
 | `feature` | — | Repeatable or comma-separated. Values: `captions`, `hd`, `nostr` |
 | `sort` | `relevance` | One of: `relevance`, `newest`, `oldest`, `duration`; raw Meili sorts such as `rankingScore:desc`, `created_at:desc`, `effectivePublishedAt:desc`, `duration:desc` are also accepted |
 
@@ -82,7 +83,11 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
       "textTracks": [{ "url": "https://example.com/captions.vtt", "lang": "en" }],
       "dimensions": "1920x1080",
       "mimeType": "video/mp4",
-      "mediaType": "video"
+      "mediaType": "video",
+      "availabilityStatus": "unknown",
+      "hasPlayableMedia": false,
+      "playableUrl": null,
+      "mediaCheckedAt": null
     }
   ],
   "total": 42,
@@ -93,7 +98,9 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 
 `nostrUrl` points to `https://nostu.be/v/<nevent|naddr>` for horizontal video (kinds 21, 34235) or `https://nostu.be/short/<nevent|naddr>` for short-form (kinds 22, 34236). Parameterized replaceable events (kinds 34235, 34236) use `naddr` encoding; regular events use `nevent`.
 
-The video index also stores filter-oriented metadata from Nostr tags and `imeta`, including `identifier`, `content_preview`, `duration`, `contentWarning`, `hasCaptions`, `isHd`, `isShort`, `isVideo`, `isNostrNative`, `thumbnailBlurhash`, `size`, `hash`, `fallbackUrls`, and `origins`. Existing documents need a full re-index before all newly indexed fields are populated.
+The video index also stores filter-oriented metadata from Nostr tags and `imeta`, including `identifier`, `content_preview`, `duration`, `contentWarning`, `hasCaptions`, `isHd`, `isShort`, `isVideo`, `isNostrNative`, `thumbnailBlurhash`, `size`, `hash`, `fallbackUrls`, `origins`, and denormalized media availability fields. Existing documents need a full re-index before all newly indexed fields are populated.
+
+Media availability is stored durably in a separate MeiliSearch index named `media_availability`. The `videos` index is still disposable and rebuilt through `videos_next`; during re-indexing, availability snapshots are read from `media_availability` and copied into each video document. Recommendation candidates and title suggestions hide videos marked `availabilityStatus = "unavailable"` by default. Search keeps full recall unless `available` is supplied.
 
 **Response shape (`/api/search/suggest`):**
 
@@ -159,6 +166,7 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `NOSTR_SOURCE_MAX_WAIT_MS` | `30000` | Per-query timeout when fetching from source relays (ms). |
 | `FETCH_TRUST_SCORES` | `true` | Set to `false` to skip ContextVM/relatr trust score lookups (all authors get score 0.5). |
 | `PROFILE_CACHE_TTL_MS` | `86400000` | Author profile cache TTL (ms, default 24 h). Stored at `DATA_PATH/cache/.profile-cache.json`. |
+| `BLOSSOM_LIST_CACHE_TTL_MS` | `86400000` | Author Blossom server-list cache TTL (ms, default 24 h). Stored as one file per author under `DATA_PATH/cache/blossom-lists/<npub>.json`. |
 | `TRUST_CACHE_TTL_MS` | `86400000` | Trust score cache TTL (ms, default 24 h). Stored at `DATA_PATH/cache/.trust-cache.json`. |
 | `INDEXER_INCREMENTAL_INTERVAL_MS` | `600000` | How often the indexer fetches and upserts new events (ms, default 10 min). |
 | `INDEXER_FULL_INTERVAL_MS` | `86400000` | How often a full re-index runs (ms, default 24 h). Uses a rolling index swap — the live index stays queryable throughout. |
@@ -185,10 +193,11 @@ By default MeiliSearch is only reachable inside the Docker network. To expose it
 ```
 DATA_PATH/
 ├── meilisearch/
-│   └── data.ms/              ← MeiliSearch index (managed by MeiliSearch)
+│   └── data.ms/              ← MeiliSearch indexes (videos, terms, media_availability)
 └── cache/
     ├── .indexer-state.json   ← Scheduler timestamps (lastIncrementalAt, lastFullAt)
     ├── .profile-cache.json   ← Author profile cache
+    ├── blossom-lists/         ← Author kind-10063 Blossom server-list cache
     └── .trust-cache.json     ← Trust score cache
 ```
 

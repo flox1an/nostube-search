@@ -109,6 +109,27 @@ describe('mapRecommendationHit', () => {
       recommendationScore: 0.42,
     });
   });
+
+  it('prefers verified playable URLs without dropping original fallbacks', () => {
+    const hit: RecommendationSearchHit = {
+      event_id: eventId,
+      kind: 21,
+      pubkey,
+      title: 'Playable mirror',
+      created_at: 100,
+      videoUrl: 'https://origin.example.com/video.mp4',
+      playableUrl: 'https://mirror.example.com/video.mp4',
+      fallbackUrls: ['https://mirror.example.com/video.mp4', 'https://backup.example.com/video.mp4'],
+    };
+
+    const mapped = mapRecommendationHit(hit, 0.42);
+
+    assert.deepEqual(mapped.urls, [
+      'https://mirror.example.com/video.mp4',
+      'https://origin.example.com/video.mp4',
+      'https://backup.example.com/video.mp4',
+    ]);
+  });
 });
 
 describe('scoreRecommendation', () => {
