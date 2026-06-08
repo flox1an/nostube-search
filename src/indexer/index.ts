@@ -20,6 +20,7 @@ import {
   type MediaAvailabilityDocument,
   type MediaAvailabilityStatus,
 } from './media-availability.js';
+import { runMediaAvailabilityCheck } from './availability-checker.js';
 import { collectWords, mergeWordCounts } from './words.js';
 import { connectTrustScoreClient, disconnectTrustScoreClient, fetchTrustScores } from './relatr.js';
 import { prune as pruneCache, stats as cacheStats } from './trust-cache.js';
@@ -799,11 +800,13 @@ async function runScheduler(
 ): Promise<void> {
   const fullIntervalMs = Number(process.env.INDEXER_FULL_INTERVAL_MS) || 86_400_000; // 24 h
   const incrIntervalMs = Number(process.env.INDEXER_INCREMENTAL_INTERVAL_MS) || 600_000; // 10 min
+  const availabilityIntervalMs = Number(process.env.MEDIA_AVAILABILITY_CHECK_INTERVAL_MS) || 600_000; // 10 min
   const checkIntervalMs = 60_000; // loop cadence: check every 60 s
 
   console.log(
     `[Scheduler] Full re-index every ${fullIntervalMs / 3_600_000}h, ` +
-    `incremental every ${incrIntervalMs / 60_000}m`,
+    `incremental every ${incrIntervalMs / 60_000}m, ` +
+    `availability check every ${availabilityIntervalMs / 60_000}m`,
   );
 
   let shuttingDown = false;
@@ -818,12 +821,22 @@ async function runScheduler(
     const needsFull = now - state.lastFullAt >= fullIntervalMs;
     // Only consider incremental if a full index already exists
     const needsIncremental = !needsFull && state.lastFullAt > 0 && now - state.lastIncrementalAt >= incrIntervalMs;
+    const needsAvailabilityCheck = state.lastFullAt > 0 && now - state.lastAvailabilityCheckAt >= availabilityIntervalMs;
 
     try {
       if (needsFull) {
         await fullReindex(client, sourceRelays, trustClientConnected);
       } else if (needsIncremental) {
         await incrementalUpdate(client, sourceRelays, trustClientConnected, state.lastIncrementalAt);
+      }
+
+      if (!needsFull && needsAvailabilityCheck) {
+        await runMediaAvailabilityCheck(
+          client,
+          client.index(INDEX_UID),
+          client.index(MEDIA_AVAILABILITY_INDEX_UID),
+        );
+        writeState({ lastAvailabilityCheckAt: Date.now() });
       }
     } catch (err) {
       console.error('[Scheduler] Run failed (will retry next cycle):', err);

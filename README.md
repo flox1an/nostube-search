@@ -164,6 +164,14 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `TRUST_CACHE_TTL_MS` | `86400000` | Trust score cache TTL (ms, default 24 h). Stored at `/data/cache/.trust-cache.json` in the `api_cache` volume. |
 | `INDEXER_INCREMENTAL_INTERVAL_MS` | `600000` | How often the indexer fetches and upserts new events (ms, default 10 min). |
 | `INDEXER_FULL_INTERVAL_MS` | `86400000` | How often a full re-index runs (ms, default 24 h). Uses a rolling index swap — the live index stays queryable throughout. |
+| `MEDIA_AVAILABILITY_CHECK_INTERVAL_MS` | `600000` | How often the media availability checker runs (ms, default 10 min). |
+| `MEDIA_AVAILABILITY_CHECK_BATCH_SIZE` | `100` | Maximum videos checked per availability run. |
+| `MEDIA_AVAILABILITY_HEAD_TIMEOUT_MS` | `5000` | Timeout for each media `HEAD` request. |
+| `MEDIA_AVAILABILITY_STALE_AFTER_MS` | `86400000` | Recheck verified available media after this age (ms, default 24 h). |
+| `MEDIA_AVAILABILITY_RETRY_AFTER_MS` | `3600000` | Retry unavailable/error media after this delay (ms, default 1 h). |
+| `MEDIA_AVAILABILITY_LOCK_STALE_MS` | `1800000` | Stale lock timeout for the availability checker lock file (ms, default 30 min). |
+
+The availability checker runs inside the scheduler every 10 minutes by default. Each run takes a lock at `/data/cache/.media-availability-check.lock`, selects due videos, builds candidate URLs from `videoUrl`, `fallbackUrls`, and the author's cached kind-10063 Blossom server list, then validates candidates with HTTP `HEAD`. Results are written to the durable `media_availability` index and patched back into `videos`.
 
 ---
 
@@ -210,6 +218,7 @@ Docker volumes:
 │   └── data.ms/              ← MeiliSearch indexes (videos, terms, media_availability)
 └── api_cache/
     ├── .indexer-state.json   ← Scheduler timestamps (lastIncrementalAt, lastFullAt)
+    ├── .media-availability-check.lock ← Availability checker lock (only present while running)
     ├── .profile-cache.json   ← Author profile cache
     ├── blossom-lists/         ← Author kind-10063 Blossom server-list cache
     └── .trust-cache.json     ← Trust score cache
