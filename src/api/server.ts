@@ -368,6 +368,14 @@ function sourceRelaysFromEnv(): string[] {
 async function findVideoByRef(videoRef: string): Promise<SearchHit | null> {
   const lookup = parseVideoRef(videoRef)
 
+  return sourceVideoCache.getOrCreate(
+    videoLookupCacheKey(lookup),
+    () => findVideoByLookup(lookup),
+    getPositiveEnvMs('RECOMMENDATION_SOURCE_CACHE_TTL_MS', 5 * 60_000),
+  )
+}
+
+async function findVideoByLookup(lookup: VideoLookup): Promise<SearchHit | null> {
   if (lookup.type === 'event') {
     const filter = [`event_id = ${quoteFilterValue(lookup.eventId)}`]
     const result = await meiliSearch({ q: '', limit: 1, offset: 0, filter })
@@ -391,6 +399,8 @@ async function findVideoByRef(videoRef: string): Promise<SearchHit | null> {
   const byDTag = await meiliSearch({ q: '', limit: 1, offset: 0, filter: dTagFilter })
   return byDTag.hits[0] ?? await fetchVideoFromRelayHints(lookup)
 }
+
+const sourceVideoCache = new AsyncTtlCache<string, SearchHit | null>()
 
 function firstTagValue(tags: string[][], tagName: string): string | null {
   const tag = tags.find(entry => entry[0] === tagName && typeof entry[1] === 'string')
@@ -634,6 +644,7 @@ async function searchReferenceVideos(filter: string | null, limit: number): Prom
 }
 
 const userProfileCache = new AsyncTtlCache<string, UserRecommendationProfile | null>()
+const relatedCandidateCache = new AsyncTtlCache<string, SearchHit[]>()
 
 async function getUserRecommendationProfile(pubkey: string): Promise<UserRecommendationProfile | null> {
   const cached = userProfileCache.get(pubkey)
@@ -669,16 +680,49 @@ async function buildUserRecommendationProfileFromRelays(pubkey: string): Promise
   return buildUserRecommendationProfile(pubkey, signals, [...eventVideos, ...addressVideos])
 }
 
-async function relatedVideos(input: {
-  videoRef: string
-  user?: string | null
+function sourceIdentityKey(source: SearchHit): string {
+  const address = addressKey(source)
+  if (address) return `addr:${address}`
+  if (source.event_id) return `event:${source.event_id}`
+  return `fallback:${source.kind ?? ''}:${source.pubkey ?? ''}:${source.title ?? ''}:${source.created_at ?? ''}`
+}
+
+function recommendationLanguageCacheKey(language?: string | string[] | null): string {
+  if (language === null) return 'any'
+  if (Array.isArray(language)) return normalizeLanguages(language).sort().join(',') || 'auto'
+  return normalizeLanguages(language).join(',') || 'auto'
+}
+
+function relatedCandidateCacheKey(source: SearchHit, input: {
   language?: string | string[] | null
   limit: number
   excludeContentWarnings: boolean
-}) {
-  const source = await findVideoByRef(input.videoRef)
-  if (!source) return null
+}): string {
+  return [
+    sourceIdentityKey(source),
+    `limit:${input.limit}`,
+    `language:${recommendationLanguageCacheKey(input.language)}`,
+    `excludeContentWarnings:${input.excludeContentWarnings}`,
+  ].join('|')
+}
 
+async function getRelatedCandidates(source: SearchHit, input: {
+  language?: string | string[] | null
+  limit: number
+  excludeContentWarnings: boolean
+}): Promise<SearchHit[]> {
+  return relatedCandidateCache.getOrCreate(
+    relatedCandidateCacheKey(source, input),
+    () => fetchRelatedCandidates(source, input),
+    getPositiveEnvMs('RECOMMENDATION_CANDIDATE_CACHE_TTL_MS', 2 * 60_000),
+  )
+}
+
+async function fetchRelatedCandidates(source: SearchHit, input: {
+  language?: string | string[] | null
+  limit: number
+  excludeContentWarnings: boolean
+}): Promise<SearchHit[]> {
   const candidateLimit = Math.max(input.limit * 4, input.limit)
   const typeFilters = [
     ...recommendationCandidateFilters(source),
@@ -695,10 +739,6 @@ async function relatedVideos(input: {
     filter: typeFilters,
     showRankingScore: true,
   })
-
-  const userPubkey = normalizePubkey(input.user)
-  const profile = userPubkey ? await getUserRecommendationProfile(userPubkey) : null
-  const loggedIn = Boolean(profile)
 
   const allHits: SearchHit[] = [...(simResult.hits ?? [])]
 
@@ -741,6 +781,24 @@ async function relatedVideos(input: {
     for (const hit of popularResult.hits ?? []) allHits.push({ ...hit, _rankingScore: undefined })
     candidates = filterAndDedupeCandidates(source, allHits, input.excludeContentWarnings)
   }
+
+  return candidates
+}
+
+async function relatedVideos(input: {
+  videoRef: string
+  user?: string | null
+  language?: string | string[] | null
+  limit: number
+  excludeContentWarnings: boolean
+}) {
+  const source = await findVideoByRef(input.videoRef)
+  if (!source) return null
+
+  const userPubkey = normalizePubkey(input.user)
+  const profile = userPubkey ? await getUserRecommendationProfile(userPubkey) : null
+  const loggedIn = Boolean(profile)
+  const candidates = await getRelatedCandidates(source, input)
 
   const sorted = excludeKnownUnavailableHits(candidates)
     .map(candidate => {
