@@ -1,5 +1,6 @@
 import { SimplePool, type Event } from 'nostr-tools';
 
+import { filterVerifiedEvents } from '../nostr-events.js';
 import * as blossomListCache from './blossom-list-cache.js';
 
 type BlossomServerList = {
@@ -67,7 +68,7 @@ async function fetchBlossomListsFromRelay(pubkeys: string[]): Promise<Map<string
     );
 
     const lists = new Map<string, BlossomServerList>();
-    for (const [pubkey, event] of latestEventsByPubkey(events)) {
+    for (const [pubkey, event] of latestEventsByPubkey(filterVerifiedEvents(events, 'blossom-lists'))) {
       lists.set(pubkey, {
         servers: parseServerTags(event),
         eventCreatedAt: event.created_at,

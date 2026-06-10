@@ -1,5 +1,7 @@
 import { SimplePool, type Event } from 'nostr-tools';
 
+import { filterVerifiedEvents } from '../nostr-events.js';
+
 export const VIDEO_KINDS: number[] = [21, 22, 34235, 34236];
 const RELATION_KINDS = [7, 1, 9734, 9735];
 const PAGE_SIZE = 500;
@@ -38,7 +40,8 @@ export async function fetchVideoEventsSince(relays: string[], since: number): Pr
         );
 
         if (events.length === 0) break;
-        for (const e of events) seen.set(e.id, e);
+        const verifiedEvents = filterVerifiedEvents(events, relay);
+        for (const e of verifiedEvents) seen.set(e.id, e);
         if (events.length < PAGE_SIZE) break;
 
         const minTs = Math.min(...events.map(e => e.created_at)) - 1;
@@ -69,9 +72,10 @@ async function fetchAllVideoEventsFromRelay(relay: string, seen: Map<string, Eve
       );
 
       if (events.length === 0) break;
+      const verifiedEvents = filterVerifiedEvents(events, relay);
 
-      for (const e of events) seen.set(e.id, e);
-      console.log(`[RelaySource] ${relay}: page ${events.length} events (total unique so far: ${seen.size})`);
+      for (const e of verifiedEvents) seen.set(e.id, e);
+      console.log(`[RelaySource] ${relay}: page ${verifiedEvents.length}/${events.length} verified events (total unique so far: ${seen.size})`);
 
       if (events.length < PAGE_SIZE) break;
 
@@ -160,7 +164,7 @@ export async function fetchRelationCountsForBatch(
     // Deduplicate relation events by their own ID
     const allRelationEvents = new Map<string, Event>();
     for (const events of allChunkResults) {
-      for (const e of events) allRelationEvents.set(e.id, e);
+      for (const e of filterVerifiedEvents(events, 'relation-counts')) allRelationEvents.set(e.id, e);
     }
 
     const counts = new Map<string, EventRelationCounts>();

@@ -19,6 +19,7 @@ import {
   type RecommendationSearchHit,
   type UserRecommendationProfile,
 } from './recommendations.js'
+import { filterVerifiedEvents } from '../nostr-events.js'
 
 type SearchHit = {
   event_id?: string
@@ -486,7 +487,8 @@ async function fetchVideoFromRelayHintsUncached(lookup: VideoLookup): Promise<Se
       filter[0],
       { maxWait, label: 'nostube-search-recommendation-ref' },
     )
-    return events[0] ? eventToSearchHit(events[0]) : null
+    const verifiedEvents = filterVerifiedEvents(events, 'recommendation-ref')
+    return verifiedEvents[0] ? eventToSearchHit(verifiedEvents[0]) : null
   } finally {
     pool.destroy()
   }
@@ -558,11 +560,12 @@ async function fetchUserSignalEvents(pubkey: string): Promise<Event[]> {
   const limit = Number(process.env.RECOMMENDATION_SIGNAL_LIMIT) || 300
 
   try {
-    return await pool.querySync(
+    const events = await pool.querySync(
       sourceRelaysFromEnv(),
       { authors: [pubkey], kinds: [7, 1, 9735], limit },
       { maxWait, label: 'nostube-search-recommendation-signals' },
     )
+    return filterVerifiedEvents(events, 'recommendation-signals')
   } finally {
     pool.destroy()
   }

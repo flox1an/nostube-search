@@ -1,5 +1,6 @@
 import { SimplePool, type Event } from 'nostr-tools';
 
+import { filterVerifiedEvents } from '../nostr-events.js';
 import type { AuthorProfile } from './scoring.js';
 import * as profileCache from './profile-cache.js';
 
@@ -70,7 +71,7 @@ async function fetchProfilesFromRelay(pubkeys: string[]): Promise<Map<string, Au
     );
 
     const profiles = new Map<string, AuthorProfile>();
-    for (const [pubkey, event] of latestProfileEventsByPubkey(events)) {
+    for (const [pubkey, event] of latestProfileEventsByPubkey(filterVerifiedEvents(events, 'profiles'))) {
       const profile = parseAuthorProfile(event.content);
       if (profile) {
         profiles.set(pubkey, profile);
