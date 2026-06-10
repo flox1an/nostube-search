@@ -25,6 +25,10 @@ export type RecommendationSearchHit = {
   hasPlayableMedia?: boolean;
   playableUrl?: string | null;
   mediaType?: 'video' | 'audio' | null;
+  language?: string | null;
+  languageSource?: 'tag' | 'caption' | 'local' | null;
+  languageConfidence?: number | null;
+  captionLanguages?: string[];
   contentWarning?: string | null;
   rankingScore?: number;
   reactionsCount?: number;
@@ -47,6 +51,10 @@ export type RecommendationVideo = {
   link: string;
   type: 'videos' | 'shorts';
   mediaType?: 'video' | 'audio';
+  language: string | null;
+  languageSource: 'tag' | 'caption' | 'local' | null;
+  languageConfidence: number | null;
+  captionLanguages: string[];
   contentWarning: string | null;
   thumbnailVariants: Array<{
     url: string;
@@ -378,6 +386,10 @@ export function mapRecommendationHit(hit: RecommendationSearchHit, recommendatio
     link: buildEventLink(hit),
     type: getVideoType(kind),
     ...(hit.mediaType ? { mediaType: hit.mediaType } : {}),
+    language: hit.language ?? null,
+    languageSource: hit.languageSource ?? null,
+    languageConfidence: hit.languageConfidence ?? null,
+    captionLanguages: Array.isArray(hit.captionLanguages) ? hit.captionLanguages : [],
     contentWarning: hit.contentWarning ?? null,
     thumbnailVariants,
     recommendationScore,

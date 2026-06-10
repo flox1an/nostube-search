@@ -97,6 +97,10 @@ describe('mapRecommendationHit', () => {
       link: nip19.naddrEncode({ kind: 34235, pubkey, identifier: 'intro' }),
       type: 'videos',
       mediaType: 'video',
+      language: null,
+      languageSource: null,
+      languageConfidence: null,
+      captionLanguages: [],
       contentWarning: null,
       thumbnailVariants: [
         {

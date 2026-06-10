@@ -26,6 +26,7 @@ import { connectTrustScoreClient, disconnectTrustScoreClient, fetchTrustScores }
 import { prune as pruneCache, stats as cacheStats } from './trust-cache.js';
 import { fetchAuthorProfiles, profileCache } from './profiles.js';
 import { blossomListCache } from './blossom-lists.js';
+import { detectLanguageLocally } from './language-detector.js';
 import {
   sourceRelaysFromEnv,
   fetchAllVideoEvents,
@@ -35,6 +36,7 @@ import {
   type EventRelationCounts,
 } from './relay-source.js';
 import { readState, writeState, setStatePath } from './state.js';
+import { firstLanguageTag, normalizeLanguage } from '../language.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -132,6 +134,10 @@ type SearchDocument = {
   mediaCheckedAt: number | null;
   mediaRetryAfter: number | null;
   contentWarning: string | null;
+  language: string | null;
+  languageSource: 'tag' | 'caption' | 'local' | null;
+  languageConfidence: number | null;
+  captionLanguages: string[];
   textTracks: TextTrack[];
   hasCaptions: boolean;
   origins: Origin[];
@@ -335,6 +341,12 @@ function parseTextTracks(tags: string[][]): TextTrack[] {
     .filter(track => track.url.length > 0);
 }
 
+function captionLanguagesFromTextTracks(textTracks: TextTrack[]): string[] {
+  return [...new Set(textTracks
+    .map(track => normalizeLanguage(track.lang))
+    .filter((lang): lang is string => Boolean(lang)))];
+}
+
 function parseOrigins(tags: string[][]): Origin[] {
   return tags
     .filter(entry => entry[0] === 'origin')
@@ -400,14 +412,14 @@ function generateNostubeUrl(row: { event_id: string; pubkey: string; kind: numbe
   return `${baseUrl}/${nevent}?author=${row.pubkey}&video=${row.event_id}`;
 }
 
-function toSearchDocument(
+async function toSearchDocument(
   row: VideoEventRow,
   profileByPubkey: Map<string, AuthorProfile>,
   relationCountsByEventId: Map<string, EventRelationCounts>,
   urlStatsByEventId: Map<string, EventUrlStats>,
   trustScoreByPubkey: Map<string, number>,
   availabilityByKey: Map<string, MediaAvailabilityDocument>,
-): SearchDocument {
+): Promise<SearchDocument> {
   const tags = getTags(row.raw_event);
 
   const title = firstTagValue(tags, 'title') ?? 'Untitled';
@@ -431,7 +443,23 @@ function toSearchDocument(
   const duration = parsePositiveInt(firstTagValue(tags, 'duration'));
   const publishedAt = parsePositiveInt(firstTagValue(tags, 'published_at'));
   const textTracks = parseTextTracks(tags);
+  const captionLanguages = captionLanguagesFromTextTracks(textTracks);
   const origins = parseOrigins(tags);
+  const tagLanguage = firstLanguageTag(tags);
+  const localLanguage = tagLanguage ? null : detectLanguageLocally({ title, summary, content: row.content });
+  const language = tagLanguage ?? localLanguage?.language ?? (captionLanguages.length === 1 ? captionLanguages[0] : null);
+  const languageSource = tagLanguage
+    ? 'tag'
+    : localLanguage?.language
+      ? 'local'
+      : captionLanguages.length === 1
+        ? 'caption'
+        : null;
+  const languageConfidence = languageSource === 'tag'
+    ? 1
+    : languageSource === 'caption'
+      ? 0.8
+      : localLanguage?.confidence ?? null;
 
   let npub = '';
   try { npub = nip19.npubEncode(row.pubkey); }
@@ -519,6 +547,10 @@ function toSearchDocument(
     mediaCheckedAt: availability.mediaCheckedAt,
     mediaRetryAfter: availability.mediaRetryAfter,
     contentWarning,
+    language,
+    languageSource,
+    languageConfidence,
+    captionLanguages,
     textTracks,
     hasCaptions: textTracks.length > 0,
     origins,
@@ -548,7 +580,7 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
       'event_id', 'kind', 'pubkey', 'published_at', 'created_at', 'duration', 'hasCaptions',
       'effectivePublishedAt', 'isHd', 'isShort', 'isVideo', 'isNostrNative', 'mediaType',
       'identifier', 'd_tag', 'mediaAvailabilityKey', 'availabilityStatus', 'hasPlayableMedia',
-      'mediaCheckedAt', 'mediaRetryAfter',
+      'mediaCheckedAt', 'mediaRetryAfter', 'language', 'languageSource', 'captionLanguages',
     ],
     sortableAttributes: [
       'rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration',
@@ -674,9 +706,9 @@ async function indexBatch(
     .filter((key): key is string => Boolean(key));
   const availabilityByKey = await fetchAvailabilityByKeys(availabilityIndex, availabilityKeys);
 
-  const documents = rows.map(row =>
+  const documents = await Promise.all(rows.map(row =>
     toSearchDocument(row, profileByPubkey, relationCountsByEventId, urlStatsByEventId, trustScoreByPubkey, availabilityByKey),
-  );
+  ));
 
   const task = await videosIndex.addDocuments(documents);
   console.log(`[Indexer] ${batchOffset + rows.length}/${total} events enqueued (taskUid=${task.taskUid})`);

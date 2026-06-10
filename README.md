@@ -55,6 +55,8 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 | `date` | `any` | One of: `any`, `today`, `week`, `month`, `year`; based on `published_at ?? created_at` |
 | `available` | — | Optional media availability filter. Use `true` for only verified playable media, or `exclude-unavailable` to hide known-broken media while keeping unchecked videos. |
 | `feature` | — | Repeatable or comma-separated. Values: `captions`, `hd`, `nostr` |
+| `language` | — | Repeatable or comma-separated primary language filter, e.g. `de`, `en`, `pt-br` |
+| `captionLanguage` | — | Repeatable or comma-separated caption language filter, e.g. `en` |
 | `sort` | `relevance` | One of: `relevance`, `newest`, `oldest`, `duration`; raw Meili sorts such as `rankingScore:desc`, `created_at:desc`, `effectivePublishedAt:desc`, `duration:desc` are also accepted |
 
 `sort=popularity` is intentionally not supported until the index has reliable popularity metrics such as views, likes/zaps, or replay data.
@@ -79,6 +81,10 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
       "authorDisplayName": "Alice",
       "rankingScore": 0.987,
       "nostrUrl": "https://nostu.be/v/naddr1...",
+      "language": "en",
+      "languageSource": "tag",
+      "languageConfidence": 1,
+      "captionLanguages": ["en"],
       "contentWarning": null,
       "textTracks": [{ "url": "https://example.com/captions.vtt", "lang": "en" }],
       "dimensions": "1920x1080",
@@ -98,7 +104,11 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 
 `nostrUrl` points to `https://nostu.be/v/<nevent|naddr>` for horizontal video (kinds 21, 34235) or `https://nostu.be/short/<nevent|naddr>` for short-form (kinds 22, 34236). Parameterized replaceable events (kinds 34235, 34236) use `naddr` encoding; regular events use `nevent`.
 
-The video index also stores filter-oriented metadata from Nostr tags and `imeta`, including `identifier`, `content_preview`, `duration`, `contentWarning`, `hasCaptions`, `isHd`, `isShort`, `isVideo`, `isNostrNative`, `thumbnailBlurhash`, `size`, `hash`, `fallbackUrls`, `origins`, and denormalized media availability fields. Existing documents need a full re-index before all newly indexed fields are populated.
+The video index also stores filter-oriented metadata from Nostr tags and `imeta`, including `identifier`, `content_preview`, `duration`, `contentWarning`, `language`, `languageSource`, `languageConfidence`, `captionLanguages`, `hasCaptions`, `isHd`, `isShort`, `isVideo`, `isNostrNative`, `thumbnailBlurhash`, `size`, `hash`, `fallbackUrls`, `origins`, and denormalized media availability fields. Existing documents need a full re-index before all newly indexed fields are populated.
+
+Primary `language` is read from `language`, `lang`, or `locale` tags first. If no locale tag exists, the indexer estimates the language locally from title/summary/content with `franc-min`; if that is inconclusive, it falls back to a single caption language when available.
+
+`POST /api/recommendations/related` accepts an optional `language` body field. If omitted, related recommendations filter to the source video's language when known. Use `"language": "any"` to disable language filtering.
 
 Media availability is stored durably in a separate MeiliSearch index named `media_availability`. The `videos` index is still disposable and rebuilt through `videos_next`; during re-indexing, availability snapshots are read from `media_availability` and copied into each video document. Recommendation candidates and title suggestions hide videos marked `availabilityStatus = "unavailable"` by default. Search keeps full recall unless `available` is supplied.
 

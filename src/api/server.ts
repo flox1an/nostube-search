@@ -20,6 +20,7 @@ import {
   type UserRecommendationProfile,
 } from './recommendations.js'
 import { filterVerifiedEvents } from '../nostr-events.js'
+import { firstLanguageTag, normalizeLanguage, normalizeLanguages } from '../language.js'
 
 type SearchHit = {
   event_id?: string
@@ -58,6 +59,10 @@ type SearchHit = {
   mediaCheckedAt?: number | null
   mediaRetryAfter?: number | null
   contentWarning?: string | null
+  language?: string | null
+  languageSource?: 'tag' | 'caption' | 'local' | null
+  languageConfidence?: number | null
+  captionLanguages?: string[]
   textTracks?: Array<{ url?: string; lang?: string | null }>
   hasCaptions?: boolean
   origins?: Array<{
@@ -176,6 +181,13 @@ function parseKindFilters(input: string | string[] | undefined): string | undefi
   return `(${kinds.map(kind => `kind = ${kind}`).join(' OR ')})`
 }
 
+function parseLanguageFilter(input: string | string[] | undefined, field = 'language'): string | undefined {
+  const languages = normalizeLanguages(input).filter(language => language !== 'any')
+  if (languages.length === 0) return undefined
+  if (languages.length === 1) return `${field} = ${quoteFilterValue(languages[0])}`
+  return `(${languages.map(language => `${field} = ${quoteFilterValue(language)}`).join(' OR ')})`
+}
+
 function parseSearchFilters(query: {
   type?: string
   duration?: string
@@ -183,6 +195,8 @@ function parseSearchFilters(query: {
   available?: string
   feature?: string | string[]
   kinds?: string | string[]
+  language?: string | string[]
+  captionLanguage?: string | string[]
 }): string[] {
   const filters: string[] = []
 
@@ -207,6 +221,12 @@ function parseSearchFilters(query: {
 
   const kindFilter = parseKindFilters(query.kinds)
   if (kindFilter) filters.push(kindFilter)
+
+  const languageFilter = parseLanguageFilter(query.language)
+  if (languageFilter) filters.push(languageFilter)
+
+  const captionLanguageFilter = parseLanguageFilter(query.captionLanguage, 'captionLanguages')
+  if (captionLanguageFilter) filters.push(captionLanguageFilter)
 
   const features = Array.isArray(query.feature)
     ? query.feature.flatMap(feature => feature.split(','))
@@ -278,6 +298,10 @@ function mapHit(hit: SearchHit) {
     rankingScore: hit.rankingScore ?? 0,
     nostrUrl,
     contentWarning: hit.contentWarning ?? null,
+    language: hit.language ?? null,
+    languageSource: hit.languageSource ?? null,
+    languageConfidence: hit.languageConfidence ?? null,
+    captionLanguages: Array.isArray(hit.captionLanguages) ? hit.captionLanguages : [],
     textTracks: Array.isArray(hit.textTracks)
       ? hit.textTracks.map(track => ({ url: track.url ?? '', lang: track.lang ?? null })).filter(track => track.url)
       : [],
@@ -421,6 +445,7 @@ function eventToSearchHit(event: Event): SearchHit {
   const summary = firstTagValue(tags, 'summary') ?? firstTagValue(tags, 'alt') ?? event.content ?? ''
   const publishedAt = parsePositiveInt(firstTagValue(tags, 'published_at'))
   const kind = event.kind
+  const language = firstLanguageTag(tags)
 
   return {
     event_id: event.id,
@@ -444,6 +469,10 @@ function eventToSearchHit(event: Event): SearchHit {
     isShort: kind === 22 || kind === 34236,
     isVideo: kind === 21 || kind === 34235,
     contentWarning: firstTagValue(tags, 'content-warning'),
+    language,
+    languageSource: language ? 'tag' : null,
+    languageConfidence: language ? 1 : null,
+    captionLanguages: [],
     rankingScore: 0,
     reactionsCount: 0,
     commentsCount: 0,
@@ -518,6 +547,14 @@ function candidateFilters(source: SearchHit): string[] {
 
 function recommendationCandidateFilters(source: SearchHit): string[] {
   return candidateFilters(source)
+}
+
+function recommendationLanguageFilters(source: SearchHit, languageInput?: string | string[] | null): string[] {
+  if (languageInput === null || languageInput === 'any') return []
+  const explicit = parseLanguageFilter(languageInput ?? undefined)
+  if (explicit) return [explicit]
+  const sourceLanguage = normalizeLanguage(source.language)
+  return sourceLanguage ? [`language = ${quoteFilterValue(sourceLanguage)}`] : []
 }
 
 function excludeKnownUnavailableHits(hits: SearchHit[]): SearchHit[] {
@@ -635,6 +672,7 @@ async function buildUserRecommendationProfileFromRelays(pubkey: string): Promise
 async function relatedVideos(input: {
   videoRef: string
   user?: string | null
+  language?: string | string[] | null
   limit: number
   excludeContentWarnings: boolean
 }) {
@@ -642,7 +680,10 @@ async function relatedVideos(input: {
   if (!source) return null
 
   const candidateLimit = Math.max(input.limit * 4, input.limit)
-  const typeFilters = recommendationCandidateFilters(source)
+  const typeFilters = [
+    ...recommendationCandidateFilters(source),
+    ...recommendationLanguageFilters(source, input.language),
+  ]
 
   // Stage 1: similarity search — MeiliSearch stops at the first term combination
   // that finds any results (matchingStrategy "last"), so niche/foreign content
@@ -753,6 +794,8 @@ app.get('/api/search', async c => {
     available: c.req.query('available'),
     feature: c.req.queries('feature') ?? c.req.query('feature'),
     kinds: c.req.queries('kinds') ?? c.req.query('kinds'),
+    language: c.req.queries('language') ?? c.req.query('language'),
+    captionLanguage: c.req.queries('captionLanguage') ?? c.req.query('captionLanguage'),
   })
 
   try {
@@ -819,6 +862,7 @@ app.post('/api/recommendations/related', async c => {
     videoRef?: unknown
     user?: unknown
     limit?: unknown
+    language?: unknown
     excludeContentWarnings?: unknown
   }
 
@@ -844,6 +888,11 @@ app.post('/api/recommendations/related', async c => {
     const hits = await relatedVideos({
       videoRef: body.videoRef,
       user: typeof body.user === 'string' ? body.user : null,
+      language: typeof body.language === 'string'
+        ? body.language
+        : Array.isArray(body.language) && body.language.every(value => typeof value === 'string')
+          ? body.language
+          : undefined,
       limit,
       excludeContentWarnings,
     })
