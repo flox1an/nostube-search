@@ -275,55 +275,25 @@ function mapHit(hit: SearchHit) {
   const event_id = hit.event_id ?? ''
   const pubkey = hit.pubkey ?? ''
   const kind = hit.kind ?? 0
-
-  const nostrUrl = event_id && pubkey
-    ? hit.nostrUrl ?? generateNostubeUrl({ event_id, pubkey, kind, d_tag: hit.d_tag ?? hit.identifier })
-    : ''
-
   return {
     event_id,
     title: hit.title ?? 'Untitled',
     content_preview: contentPreview(hit),
     pubkey,
-    npub: hit.npub ?? null,
     kind,
     created_at: hit.created_at ?? 0,
     published_at: hit.published_at ?? null,
     duration: hit.duration ?? null,
     thumbnail: hit.thumbnail ?? null,
-    thumbnailBlurhash: hit.thumbnailBlurhash ?? null,
     videoUrl: hit.videoUrl ?? null,
     tags: Array.isArray(hit.tags) ? hit.tags : [],
-    authorDisplayName: hit.authorDisplayName ?? null,
-    rankingScore: hit.rankingScore ?? 0,
-    nostrUrl,
-    contentWarning: hit.contentWarning ?? null,
-    language: hit.language ?? null,
-    languageSource: hit.languageSource ?? null,
-    languageConfidence: hit.languageConfidence ?? null,
-    captionLanguages: Array.isArray(hit.captionLanguages) ? hit.captionLanguages : [],
+    mimeType: hit.mimeType ?? null,
+    mediaType: hit.mediaType ?? null,
+    dimensions: hit.dimensions ?? null,
     textTracks: Array.isArray(hit.textTracks)
       ? hit.textTracks.map(track => ({ url: track.url ?? '', lang: track.lang ?? null })).filter(track => track.url)
       : [],
-    hasCaptions: hit.hasCaptions ?? false,
-    dimensions: hit.dimensions ?? null,
-    height: hit.height ?? null,
-    isHd: hit.isHd ?? false,
-    isShort: hit.isShort ?? false,
-    isVideo: hit.isVideo ?? false,
-    isNostrNative: hit.isNostrNative ?? false,
-    mimeType: hit.mimeType ?? null,
-    mediaType: hit.mediaType ?? null,
-    size: hit.size ?? null,
-    hash: hit.hash ?? null,
-    fallbackUrls: Array.isArray(hit.fallbackUrls) ? hit.fallbackUrls : [],
-    mediaAvailabilityKey: hit.mediaAvailabilityKey ?? null,
-    availabilityStatus: hit.availabilityStatus ?? 'unknown',
-    hasPlayableMedia: hit.hasPlayableMedia ?? false,
-    playableUrl: hit.playableUrl ?? null,
-    mediaCheckedAt: hit.mediaCheckedAt ?? null,
-    mediaRetryAfter: hit.mediaRetryAfter ?? null,
-    origins: Array.isArray(hit.origins) ? hit.origins : [],
+    contentWarning: hit.contentWarning ?? null,
   }
 }
 
