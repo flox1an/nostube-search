@@ -228,7 +228,7 @@ function parseDimensions(dim: string | null): { dimensions: string | null; width
 function collectTopicTags(tags: string[][]): string[] {
   return tags
     .filter(entry => entry[0] === 't' && typeof entry[1] === 'string' && entry[1].trim().length > 0)
-    .map(entry => entry[1]);
+    .map(entry => entry[1].trim().toLowerCase());
 }
 
 function parseImetaTags(tags: string[][]): ParsedImeta {
@@ -581,6 +581,7 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
       'effectivePublishedAt', 'isHd', 'isShort', 'isVideo', 'isNostrNative', 'mediaType',
       'identifier', 'd_tag', 'mediaAvailabilityKey', 'availabilityStatus', 'hasPlayableMedia',
       'mediaCheckedAt', 'mediaRetryAfter', 'language', 'languageSource', 'captionLanguages',
+      'tags',
     ],
     sortableAttributes: [
       'rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration',

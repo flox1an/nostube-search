@@ -874,6 +874,44 @@ app.get('/api/search', async c => {
   }
 })
 
+app.get('/api/tags', async c => {
+  const t = (c.req.query('t') ?? '').trim().toLowerCase()
+  if (!t) return c.json({ error: 'Missing query parameter t' }, 400)
+
+  const limit = toInt(c.req.query('limit'), 50)
+  const offset = toInt(c.req.query('offset'), 0)
+  const sort = parseSort(c.req.query('sort'))
+  const filter = [
+    `tags = ${quoteFilterValue(t)}`,
+    ...parseSearchFilters({
+      type: c.req.query('type'),
+      duration: c.req.query('duration'),
+      date: c.req.query('date'),
+      available: c.req.query('available'),
+      feature: c.req.queries('feature') ?? c.req.query('feature'),
+      kinds: c.req.queries('kinds') ?? c.req.query('kinds'),
+      language: c.req.queries('language') ?? c.req.query('language'),
+      captionLanguage: c.req.queries('captionLanguage') ?? c.req.query('captionLanguage'),
+    }),
+  ]
+
+  try {
+    const result = await meiliSearch({
+      q: '',
+      limit,
+      offset,
+      ...(sort ? { sort: [sort] } : {}),
+      filter,
+    })
+    const hits = (result.hits ?? []).map(mapHit)
+    const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
+    return c.json({ hits, total, limit, offset })
+  } catch (err) {
+    console.error('[API] Tags request failed:', err)
+    return c.json({ error: 'Search engine unavailable' }, 502)
+  }
+})
+
 app.get('/api/search/suggest', async c => {
   const q = (c.req.query('q') ?? '').trim()
   if (!q) return c.json({ suggestions: [] })
