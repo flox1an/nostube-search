@@ -19,6 +19,7 @@ import {
   type RecommendationSearchHit,
   type UserRecommendationProfile,
 } from './recommendations.js'
+import { blockedAuthorPubkeys, isBlockedAuthorPubkey } from './blocked-authors.js'
 import { filterVerifiedEvents } from '../nostr-events.js'
 import { firstLanguageTag, normalizeLanguage, normalizeLanguages } from '../language.js'
 
@@ -305,13 +306,22 @@ async function meiliSearch(params: {
   filter?: string[]
   showRankingScore?: boolean
 }) {
+  const blockedAuthorFilters = blockedAuthorPubkeys()
+    .map(pubkey => `pubkey != ${quoteFilterValue(pubkey)}`)
+  const searchParams = {
+    ...params,
+    ...(blockedAuthorFilters.length > 0
+      ? { filter: [...(params.filter ?? []), ...blockedAuthorFilters] }
+      : {}),
+  }
+
   const res = await fetch(`${meiliUrl}/indexes/videos/search`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${meiliMasterKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(params),
+    body: JSON.stringify(searchParams),
   })
 
   if (!res.ok) {
@@ -338,11 +348,12 @@ function sourceRelaysFromEnv(): string[] {
 async function findVideoByRef(videoRef: string): Promise<SearchHit | null> {
   const lookup = parseVideoRef(videoRef)
 
-  return sourceVideoCache.getOrCreate(
+  const hit = await sourceVideoCache.getOrCreate(
     videoLookupCacheKey(lookup),
     () => findVideoByLookup(lookup),
     getPositiveEnvMs('RECOMMENDATION_SOURCE_CACHE_TTL_MS', 5 * 60_000),
   )
+  return isBlockedAuthorPubkey(hit?.pubkey) ? null : hit
 }
 
 async function findVideoByLookup(lookup: VideoLookup): Promise<SearchHit | null> {
