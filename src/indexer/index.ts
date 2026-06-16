@@ -36,6 +36,12 @@ import {
   defaultRelationCounts,
   type EventRelationCounts,
 } from './relay-source.js';
+import {
+  PEOPLE_INDEX_UID,
+  buildPeopleDocuments,
+  ensurePeopleIndex,
+  upsertPeopleDocuments,
+} from './people-index.js';
 import { readState, writeState, setStatePath } from './state.js';
 import { firstLanguageTag, normalizeLanguage } from '../language.js';
 
@@ -675,7 +681,7 @@ async function indexBatch(
   trustClientConnected: boolean,
   batchOffset: number,
   total: number,
-): Promise<{ taskUid: number; wordCounts: Map<string, number> }> {
+): Promise<{ taskUid: number; wordCounts: Map<string, number>; profileByPubkey: Map<string, AuthorProfile>; trustScoreByPubkey: Map<string, number>; pubkeys: string[] }> {
   const rows = batchEvents.map(eventToVideoRow);
   const uniquePubkeys = Array.from(new Set(rows.map(r => r.pubkey)));
 
@@ -717,7 +723,7 @@ async function indexBatch(
   const task = await videosIndex.addDocuments(documents);
   console.log(`[Indexer] ${batchOffset + rows.length}/${total} events enqueued (taskUid=${task.taskUid})`);
 
-  return { taskUid: task.taskUid, wordCounts: collectWords(documents) };
+  return { taskUid: task.taskUid, wordCounts: collectWords(documents), profileByPubkey, trustScoreByPubkey, pubkeys: uniquePubkeys };
 }
 
 // ── Playlist score pass ───────────────────────────────────────────────────────
@@ -856,21 +862,31 @@ async function incrementalUpdate(
   const videosIndex = client.index(INDEX_UID);
   const availabilityIndex = client.index(MEDIA_AVAILABILITY_INDEX_UID);
   const allWordCounts = new Map<string, number>();
+  const pubkeyVideoCount = new Map<string, number>();
+  const allProfilesByPubkey = new Map<string, AuthorProfile>();
+  const allTrustByPubkey = new Map<string, number>();
 
   for (let offset = 0; offset < newEvents.length; offset += BATCH_SIZE) {
     const batchEvents = newEvents.slice(offset, offset + BATCH_SIZE);
-    const { wordCounts } = await indexBatch(
+    const { wordCounts, profileByPubkey, trustScoreByPubkey, pubkeys } = await indexBatch(
       videosIndex, availabilityIndex, batchEvents, sourceRelays, trustClientConnected, offset, newEvents.length,
     );
     mergeWordCounts(allWordCounts, wordCounts);
+    for (const pk of pubkeys) pubkeyVideoCount.set(pk, (pubkeyVideoCount.get(pk) ?? 0) + 1);
+    for (const [pk, profile] of profileByPubkey) allProfilesByPubkey.set(pk, profile);
+    for (const [pk, trust] of trustScoreByPubkey) allTrustByPubkey.set(pk, trust);
   }
 
   if (allWordCounts.size > 0) {
     await upsertTerms(client, TERMS_INDEX_UID, allWordCounts);
   }
 
+  await ensurePeopleIndex(client);
+  const peopleDocs = buildPeopleDocuments(pubkeyVideoCount, allProfilesByPubkey, allTrustByPubkey);
+  await upsertPeopleDocuments(client, peopleDocs);
+
   writeState({ lastIncrementalAt: Date.now() });
-  console.log(`[Indexer] Incremental complete — upserted ${newEvents.length} events.`);
+  console.log(`[Indexer] Incremental complete — upserted ${newEvents.length} events, ${peopleDocs.length} people.`);
 }
 
 // ── Full re-index (rolling swap) ──────────────────────────────────────────────
@@ -897,6 +913,9 @@ async function fullReindex(
 
   const nextVideosIndex = client.index(INDEX_NEXT_UID);
   const allWordCounts = new Map<string, number>();
+  const pubkeyVideoCount = new Map<string, number>();
+  const allProfilesByPubkey = new Map<string, AuthorProfile>();
+  const allTrustByPubkey = new Map<string, number>();
   let lastVideosTaskUid: number | undefined;
 
   const allEvents = await fetchAllVideoEvents(sourceRelays);
@@ -905,11 +924,14 @@ async function fullReindex(
 
   for (let offset = 0; offset < total; offset += BATCH_SIZE) {
     const batchEvents = allEvents.slice(offset, offset + BATCH_SIZE);
-    const { taskUid, wordCounts } = await indexBatch(
+    const { taskUid, wordCounts, profileByPubkey, trustScoreByPubkey, pubkeys } = await indexBatch(
       nextVideosIndex, availabilityIndex, batchEvents, sourceRelays, trustClientConnected, offset, total,
     );
     lastVideosTaskUid = taskUid;
     mergeWordCounts(allWordCounts, wordCounts);
+    for (const pk of pubkeys) pubkeyVideoCount.set(pk, (pubkeyVideoCount.get(pk) ?? 0) + 1);
+    for (const [pk, profile] of profileByPubkey) allProfilesByPubkey.set(pk, profile);
+    for (const [pk, trust] of trustScoreByPubkey) allTrustByPubkey.set(pk, trust);
   }
 
   console.log(`[Indexer] Upserting ${allWordCounts.size} terms into ${TERMS_NEXT_UID} ...`);
@@ -935,6 +957,12 @@ async function fullReindex(
   const now = Date.now();
   writeState({ lastFullAt: now, lastIncrementalAt: now });
   console.log(`[Indexer] Full re-index complete — ${total} events live.`);
+
+  // Rebuild people index from accumulated data
+  await ensurePeopleIndex(client);
+  const peopleDocs = buildPeopleDocuments(pubkeyVideoCount, allProfilesByPubkey, allTrustByPubkey);
+  console.log(`[Indexer] Upserting ${peopleDocs.length} people ...`);
+  await upsertPeopleDocuments(client, peopleDocs);
 
   // Playlist score pass runs on the live index immediately after the swap
   await applyPlaylistScorePass(client, sourceRelays, trustClientConnected);
@@ -1057,6 +1085,7 @@ async function main(): Promise<void> {
   await ensureIndexExists(client, INDEX_UID, 'id', applyVideoIndexSettings);
   await ensureIndexExists(client, TERMS_INDEX_UID, 'id', applyTermsIndexSettings);
   await ensureMediaAvailabilityIndex(client);
+  await ensurePeopleIndex(client);
 
   const [videosStats, termsStats] = await Promise.all([
     client.index(INDEX_UID).getStats(),

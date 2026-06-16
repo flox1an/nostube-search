@@ -895,6 +895,62 @@ app.get('/api/tags', async c => {
   }
 })
 
+type PeopleHit = {
+  pubkey: string
+  npub: string
+  name: string | null
+  display_name: string | null
+  username: string | null
+  about: string | null
+  picture: string | null
+  nip05: string | null
+  lud16: string | null
+  videoCount: number
+  globalTrustScore: number
+}
+
+app.get('/api/people', async c => {
+  const q = (c.req.query('q') ?? '').trim()
+  if (!q) return c.json({ error: 'Missing query parameter q' }, 400)
+
+  const limit = toInt(c.req.query('limit'), 10)
+  const offset = toInt(c.req.query('offset'), 0)
+
+  try {
+    const res = await fetch(`${meiliUrl}/indexes/people/search`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${meiliMasterKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        q,
+        limit,
+        offset,
+        sort: ['videoCount:desc'],
+      }),
+    })
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new Error(`MeiliSearch request failed with status ${res.status}: ${body}`)
+    }
+
+    const data = await res.json() as {
+      hits: PeopleHit[]
+      estimatedTotalHits?: number
+      totalHits?: number
+    }
+    const hits = data.hits ?? []
+    const total = data.estimatedTotalHits ?? data.totalHits ?? hits.length
+
+    return c.json({ hits, total, limit, offset })
+  } catch (err) {
+    console.error('[API] People request failed:', err)
+    return c.json({ error: 'Search engine unavailable' }, 502)
+  }
+})
+
 app.get('/api/search/suggest', async c => {
   const q = (c.req.query('q') ?? '').trim()
   if (!q) return c.json({ suggestions: [] })
