@@ -74,6 +74,7 @@ type SearchHit = {
   }>
   nostrUrl?: string
   rankingScore?: number
+  playlistScore?: number
   reactionsCount?: number
   commentsCount?: number
   zapsCount?: number
@@ -789,6 +790,7 @@ async function relatedVideos(input: {
         tagAffinity: getTagAffinity(candidate, profile),
         authorAffinity: getAuthorAffinity(candidate, profile),
         kindAffinity: getKindAffinity(candidate, profile),
+        playlistScore: candidate.playlistScore,
         loggedIn,
       })
       return { candidate, score }

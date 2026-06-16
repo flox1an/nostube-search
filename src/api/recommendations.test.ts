@@ -176,6 +176,40 @@ describe('scoreRecommendation', () => {
 
     assert.equal(Number((scoreWithKind - scoreWithoutKind).toFixed(2)), 0.03);
   });
+
+  it('playlist score contributes 0.05 for logged-in users', () => {
+    const base = scoreRecommendation({
+      candidate: { rankingScore: 0.5, reactionsCount: 0, commentsCount: 0, zapsCount: 0 },
+      contentSimilarity: 0.5,
+      tagAffinity: 0,
+      playlistScore: 0,
+      loggedIn: true,
+    });
+    const boosted = scoreRecommendation({
+      candidate: { rankingScore: 0.5, reactionsCount: 0, commentsCount: 0, zapsCount: 0 },
+      contentSimilarity: 0.5,
+      tagAffinity: 0,
+      playlistScore: 1,
+      loggedIn: true,
+    });
+    assert.equal(Number((boosted - base).toFixed(2)), 0.05);
+  });
+
+  it('playlist score contributes 0.05 for anonymous users', () => {
+    const base = scoreRecommendation({
+      candidate: { rankingScore: 0.5, reactionsCount: 0, commentsCount: 0, zapsCount: 0 },
+      contentSimilarity: 0.5,
+      playlistScore: 0,
+      loggedIn: false,
+    });
+    const boosted = scoreRecommendation({
+      candidate: { rankingScore: 0.5, reactionsCount: 0, commentsCount: 0, zapsCount: 0 },
+      contentSimilarity: 0.5,
+      playlistScore: 1,
+      loggedIn: false,
+    });
+    assert.equal(Number((boosted - base).toFixed(2)), 0.05);
+  });
 });
 
 describe('user recommendation profile', () => {

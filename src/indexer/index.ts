@@ -30,6 +30,7 @@ import { detectLanguageLocally } from './language-detector.js';
 import {
   sourceRelaysFromEnv,
   fetchAllVideoEvents,
+  fetchAllPlaylistEvents,
   fetchVideoEventsSince,
   fetchRelationCountsForBatch,
   defaultRelationCounts,
@@ -154,6 +155,7 @@ type SearchDocument = {
   videoMetadataCompleteness: number;
   globalTrustScore: number;
   rankingScore: number;
+  playlistScore: number;
   raw_event: Event;
 };
 
@@ -567,6 +569,7 @@ async function toSearchDocument(
     videoMetadataCompleteness,
     globalTrustScore,
     rankingScore,
+    playlistScore: 0,
     raw_event: row.raw_event,
   };
 }
@@ -584,12 +587,12 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
       'tags',
     ],
     sortableAttributes: [
-      'rankingScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration',
+      'rankingScore', 'playlistScore', 'created_at', 'published_at', 'effectivePublishedAt', 'duration',
       'mediaCheckedAt', 'mediaRetryAfter',
     ],
     rankingRules: [
       'words', 'typo', 'proximity', 'attribute', 'exactness', 'sort',
-      'rankingScore:desc', 'created_at:desc',
+      'rankingScore:desc', 'playlistScore:desc', 'created_at:desc',
     ],
   });
   await client.waitForTask(task.taskUid);
@@ -717,6 +720,117 @@ async function indexBatch(
   return { taskUid: task.taskUid, wordCounts: collectWords(documents) };
 }
 
+// ── Playlist score pass ───────────────────────────────────────────────────────
+
+/**
+ * Fetch all kind-30005 playlist events, resolve video references to Meilisearch
+ * document IDs, and compute a normalised playlist score per video.
+ *
+ * Score = Σ trust_score(author) over unique trusted authors who listed the video,
+ * normalised via log(1 + raw) / log(1 + max) → [0, 1].
+ *
+ * Authors below PLAYLIST_MIN_TRUST_SCORE (default 0.1) are excluded entirely
+ * before summing (hard cutoff), satisfying the "cutoff + weighted" design.
+ */
+async function buildPlaylistScoreMap(
+  sourceRelays: string[],
+  trustClientConnected: boolean,
+): Promise<Map<string, number>> {
+  const minTrust = Number(process.env.PLAYLIST_MIN_TRUST_SCORE) || 0.1;
+
+  console.log('[PlaylistScore] Fetching playlist events…');
+  const playlistEvents = await fetchAllPlaylistEvents(sourceRelays);
+  console.log(`[PlaylistScore] ${playlistEvents.length} playlist events fetched`);
+
+  if (playlistEvents.length === 0) return new Map();
+
+  const allPubkeys = [...new Set(playlistEvents.map(e => e.pubkey))];
+  const trustScores = trustClientConnected
+    ? await fetchTrustScores(allPubkeys)
+    : new Map<string, number>();
+
+  // docId → set of pubkeys that listed the video (dedup per author)
+  const refsByDocId = new Map<string, Set<string>>();
+
+  for (const event of playlistEvents) {
+    const authorScore = trustScores.get(event.pubkey) ?? 0.5;
+    if (authorScore < minTrust) continue;
+
+    for (const tag of event.tags) {
+      let docId: string | null = null;
+
+      if (tag[0] === 'e' && tag[1]) {
+        // Non-addressable video (kind 21 / 22): Meilisearch doc id == event_id
+        docId = tag[1];
+      } else if (tag[0] === 'a' && tag[1]) {
+        // Addressable video (kind 34235 / 34236): reconstruct the doc id
+        const parts = tag[1].split(':');
+        if (parts.length >= 3) {
+          const [kind, pubkey, ...identParts] = parts;
+          const identifier = identParts.join(':');
+          docId = `${kind}_${pubkey}_${Buffer.from(identifier, 'utf8').toString('hex')}`;
+        }
+      }
+
+      if (!docId) continue;
+      let refs = refsByDocId.get(docId);
+      if (!refs) { refs = new Set(); refsByDocId.set(docId, refs); }
+      refs.add(event.pubkey);
+    }
+  }
+
+  // Weighted sum: each unique trusted author contributes their trust score once
+  const rawScores = new Map<string, number>();
+  for (const [docId, pubkeys] of refsByDocId) {
+    let sum = 0;
+    for (const pubkey of pubkeys) sum += trustScores.get(pubkey) ?? 0.5;
+    rawScores.set(docId, sum);
+  }
+
+  if (rawScores.size === 0) return new Map();
+
+  const maxRaw = Math.max(...rawScores.values());
+  const logMax = Math.log1p(maxRaw);
+
+  const normalized = new Map<string, number>();
+  for (const [docId, raw] of rawScores) {
+    normalized.set(docId, logMax > 0 ? Math.log1p(raw) / logMax : 0);
+  }
+
+  console.log(`[PlaylistScore] ${normalized.size} videos scored, max raw sum = ${maxRaw.toFixed(3)}`);
+  return normalized;
+}
+
+async function applyPlaylistScorePass(
+  client: MeiliSearch,
+  sourceRelays: string[],
+  trustClientConnected: boolean,
+): Promise<void> {
+  console.log('[PlaylistScore] Starting pass…');
+  const scoreMap = await buildPlaylistScoreMap(sourceRelays, trustClientConnected);
+
+  if (scoreMap.size === 0) {
+    console.log('[PlaylistScore] No scores computed — skipping Meilisearch update.');
+    writeState({ lastPlaylistScoreAt: Date.now() });
+    return;
+  }
+
+  const index = client.index(INDEX_UID);
+  const updates = Array.from(scoreMap.entries()).map(([id, playlistScore]) => ({ id, playlistScore }));
+  const BATCH = 1_000;
+  let lastTaskUid: number | undefined;
+
+  for (let i = 0; i < updates.length; i += BATCH) {
+    const task = await index.updateDocuments(updates.slice(i, i + BATCH));
+    lastTaskUid = task.taskUid;
+    console.log(`[PlaylistScore] Queued update ${Math.min(i + BATCH, updates.length)}/${updates.length}`);
+  }
+
+  if (lastTaskUid !== undefined) await client.waitForTask(lastTaskUid);
+  writeState({ lastPlaylistScoreAt: Date.now() });
+  console.log(`[PlaylistScore] Pass complete — ${scoreMap.size} documents updated.`);
+}
+
 // ── Incremental update ────────────────────────────────────────────────────────
 
 async function incrementalUpdate(
@@ -821,6 +935,9 @@ async function fullReindex(
   const now = Date.now();
   writeState({ lastFullAt: now, lastIncrementalAt: now });
   console.log(`[Indexer] Full re-index complete — ${total} events live.`);
+
+  // Playlist score pass runs on the live index immediately after the swap
+  await applyPlaylistScorePass(client, sourceRelays, trustClientConnected);
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -837,12 +954,14 @@ async function runScheduler(
   const fullIntervalMs = Number(process.env.INDEXER_FULL_INTERVAL_MS) || 86_400_000; // 24 h
   const incrIntervalMs = Number(process.env.INDEXER_INCREMENTAL_INTERVAL_MS) || 600_000; // 10 min
   const availabilityIntervalMs = Number(process.env.MEDIA_AVAILABILITY_CHECK_INTERVAL_MS) || 600_000; // 10 min
+  const playlistScoreIntervalMs = Number(process.env.PLAYLIST_SCORE_INTERVAL_MS) || 6 * 3_600_000; // 6 h
   const checkIntervalMs = 60_000; // loop cadence: check every 60 s
 
   console.log(
     `[Scheduler] Full re-index every ${fullIntervalMs / 3_600_000}h, ` +
     `incremental every ${incrIntervalMs / 60_000}m, ` +
-    `availability check every ${availabilityIntervalMs / 60_000}m`,
+    `availability check every ${availabilityIntervalMs / 60_000}m, ` +
+    `playlist score every ${playlistScoreIntervalMs / 3_600_000}h`,
   );
 
   let shuttingDown = false;
@@ -858,6 +977,8 @@ async function runScheduler(
     // Only consider incremental if a full index already exists
     const needsIncremental = !needsFull && state.lastFullAt > 0 && now - state.lastIncrementalAt >= incrIntervalMs;
     const needsAvailabilityCheck = state.lastFullAt > 0 && now - state.lastAvailabilityCheckAt >= availabilityIntervalMs;
+    // Skip standalone playlist pass when a full reindex already ran (it runs one inline)
+    const needsPlaylistScore = !needsFull && state.lastFullAt > 0 && now - state.lastPlaylistScoreAt >= playlistScoreIntervalMs;
 
     try {
       if (needsFull) {
@@ -873,6 +994,10 @@ async function runScheduler(
           client.index(MEDIA_AVAILABILITY_INDEX_UID),
         );
         writeState({ lastAvailabilityCheckAt: Date.now() });
+      }
+
+      if (needsPlaylistScore) {
+        await applyPlaylistScorePass(client, sourceRelays, trustClientConnected);
       }
     } catch (err) {
       console.error('[Scheduler] Run failed (will retry next cycle):', err);

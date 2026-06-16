@@ -4,6 +4,7 @@ import { filterVerifiedEvents } from '../nostr-events.js';
 
 export const VIDEO_KINDS: number[] = [21, 22, 34235, 34236];
 const RELATION_KINDS = [7, 1, 9734, 9735];
+const PLAYLIST_KIND = 30005;
 const PAGE_SIZE = 500;
 
 export type EventRelationCounts = {
@@ -120,6 +121,43 @@ export async function fetchAllVideoEvents(relays: string[]): Promise<Event[]> {
 
   const deduplicated = deduplicateAddressableEvents(Array.from(seen.values()));
   return deduplicated.sort((a, b) => a.created_at - b.created_at);
+}
+
+async function fetchPlaylistEventsFromRelay(relay: string, seen: Map<string, Event>): Promise<void> {
+  const pool = new SimplePool({ enablePing: false, enableReconnect: false });
+  const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
+  const fetchLimit = Number(process.env.PLAYLIST_FETCH_LIMIT) || 5_000;
+
+  try {
+    let until: number | undefined;
+
+    for (;;) {
+      const events = await pool.querySync(
+        [relay],
+        { kinds: [PLAYLIST_KIND], limit: PAGE_SIZE, ...(until !== undefined ? { until } : {}) },
+        { maxWait, label: 'nostube-search-playlists' },
+      );
+
+      if (events.length === 0) break;
+      const verified = filterVerifiedEvents(events, relay);
+      for (const e of verified) seen.set(e.id, e);
+      console.log(`[RelaySource] ${relay}: playlist page ${verified.length}/${events.length} verified (total so far: ${seen.size})`);
+
+      if (events.length < PAGE_SIZE || seen.size >= fetchLimit) break;
+      until = Math.min(...events.map(e => e.created_at)) - 1;
+    }
+  } finally {
+    pool.destroy();
+  }
+}
+
+export async function fetchAllPlaylistEvents(relays: string[]): Promise<Event[]> {
+  const seen = new Map<string, Event>();
+  for (const relay of relays) {
+    await fetchPlaylistEventsFromRelay(relay, seen);
+  }
+  // Addressable kind — keep only the newest version per 30005:pubkey:d-tag
+  return deduplicateAddressableEvents(Array.from(seen.values()));
 }
 
 const RELATION_FILTER_CHUNK_SIZE = 50;

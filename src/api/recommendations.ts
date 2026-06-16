@@ -35,6 +35,7 @@ export type RecommendationSearchHit = {
   commentsCount?: number;
   zapsCount?: number;
   _rankingScore?: number;
+  playlistScore?: number;
 };
 
 export type RecommendationVideo = {
@@ -328,6 +329,7 @@ export function scoreRecommendation(input: {
   tagAffinity?: number;
   authorAffinity?: number;
   kindAffinity?: number;
+  playlistScore?: number;
   loggedIn: boolean;
 }): number {
   const rankingScore = clamp(input.candidate.rankingScore ?? 0);
@@ -336,18 +338,23 @@ export function scoreRecommendation(input: {
   const tagAffinity = clamp(input.tagAffinity ?? 0);
   const authorAffinity = clamp(input.authorAffinity ?? 0);
   const kindAffinity = clamp(input.kindAffinity ?? 0);
+  const playlistScore = clamp(input.playlistScore ?? 0);
 
   if (!input.loggedIn) {
-    return clamp(contentSimilarity * 0.7 + rankingScore * 0.2 + engagementScore * 0.1);
+    // weights: contentSimilarity 0.70, rankingScore 0.15, engagementScore 0.10, playlistScore 0.05
+    return clamp(contentSimilarity * 0.70 + rankingScore * 0.15 + engagementScore * 0.10 + playlistScore * 0.05);
   }
 
+  // weights: contentSimilarity 0.48, tagAffinity 0.24, rankingScore 0.10,
+  //          engagementScore 0.05, authorAffinity 0.05, kindAffinity 0.03, playlistScore 0.05
   return clamp(
     contentSimilarity * 0.48 +
     tagAffinity * 0.24 +
-    rankingScore * 0.15 +
+    rankingScore * 0.10 +
     engagementScore * 0.05 +
     authorAffinity * 0.05 +
-    kindAffinity * 0.03,
+    kindAffinity * 0.03 +
+    playlistScore * 0.05,
   );
 }
 
