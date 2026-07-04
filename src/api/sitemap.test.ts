@@ -5,6 +5,7 @@ import type { SitemapAuthorHit, SitemapVideoHit } from './sitemap.js';
 
 import {
   authorHitToSitemapEntry,
+  buildSitemap,
   buildSitemapXml,
   canonicalVideoUrl,
   isSitemapVideoEligible,
@@ -358,5 +359,58 @@ describe('buildSitemapXml', () => {
     }]);
 
     assert.ok(xml.includes('<video:description>Fallback Title</video:description>'));
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  buildSitemap — people search must not include sort                 */
+/* ------------------------------------------------------------------ */
+
+describe('buildSitemap', () => {
+  it('does not send sort in people search body and returns authors with videoCount > 10', async () => {
+    const requests: { url: string; body: Record<string, unknown> }[] = [];
+    const originalFetch = globalThis.fetch;
+
+    try {
+      globalThis.fetch = async (url: RequestInfo | URL, init?: RequestInit) => {
+        const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : (url as Request).url;
+        const body = init?.body ? JSON.parse(init.body as string) : {};
+        requests.push({ url: urlStr, body });
+
+        if (urlStr.includes('/indexes/people/search')) {
+          return new Response(JSON.stringify({
+            hits: [{
+              pubkey,
+              npub: 'npub1' + pubkey.slice(5, 59),
+              videoCount: 15,
+              globalTrustScore: 80,
+              updatedAt: 1_700_000_000,
+            }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+
+        if (urlStr.includes('/indexes/videos/search')) {
+          return new Response(JSON.stringify({ hits: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+
+        return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+      };
+
+      const xml = await buildSitemap({
+        meiliUrl: 'http://meili:7700',
+        meiliMasterKey: 'test-key',
+        maxUrls: 10,
+        maxAuthors: 5,
+      });
+
+      const peopleReq = requests.find(r => r.url.includes('/indexes/people/search'));
+      assert.ok(peopleReq, 'people search request was made to MeiliSearch');
+      assert.equal(peopleReq.body.sort, undefined, 'people search body must not include sort');
+
+      assert.ok(xml.includes('</url>'), 'sitemap should contain at least one URL entry');
+      assert.ok(xml.includes('/p/nprofile'), 'sitemap should include an author entry (nprofile URL)');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

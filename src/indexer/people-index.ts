@@ -37,7 +37,7 @@ export async function applyPeopleIndexSettings(client: MeiliSearch, uid: string)
     filterableAttributes: ['pubkey', 'videoCount'],
     sortableAttributes: ['videoCount', 'globalTrustScore', 'updatedAt'],
     rankingRules: [
-      'words', 'typo', 'proximity', 'attribute', 'exactness',
+      'words', 'typo', 'proximity', 'attribute', 'exactness', 'sort',
       'videoCount:desc', 'globalTrustScore:desc',
     ],
   });

@@ -258,7 +258,6 @@ async function collectAuthorEntries(input: {
       limit: input.maxAuthors,
       offset: 0,
       filter: [`videoCount > ${input.minVideos}`],
-      sort: ['videoCount:desc', 'globalTrustScore:desc', 'updatedAt:desc'],
       attributesToRetrieve: ['pubkey', 'npub', 'videoCount', 'globalTrustScore', 'updatedAt'],
     },
   })
