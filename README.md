@@ -40,6 +40,7 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 | `GET` | `/api/search/suggest?q=<query>` | Title suggestions (up to 5) |
 | `GET` | `/api/search/completion?prefix=<prefix>` | Word-level prefix completion |
 | `GET` | `/health` | API + MeiliSearch health check |
+| `GET` | `/sitemap.xml` | SEO sitemap with top Nostube video/short URLs plus important authors |
 | `GET` | `/` | Built-in search UI |
 
 **Search parameters (`/api/search`):**
@@ -180,6 +181,10 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `MEDIA_AVAILABILITY_STALE_AFTER_MS` | `86400000` | Recheck verified available media after this age (ms, default 24 h). |
 | `MEDIA_AVAILABILITY_RETRY_AFTER_MS` | `3600000` | Retry unavailable/error media after this delay (ms, default 1 h). |
 | `MEDIA_AVAILABILITY_LOCK_STALE_MS` | `1800000` | Stale lock timeout for the availability checker lock file (ms, default 30 min). |
+| `SITEMAP_SITE_ORIGIN` | `https://nostu.be` | Canonical Nostube origin used for sitemap URLs. |
+| `SITEMAP_MAX_URLS` | `50000` | Maximum total sitemap entries. Capped at the protocol limit of 50,000. |
+| `SITEMAP_MAX_AUTHORS` | `5000` | Maximum author profile URLs reserved inside the sitemap. |
+| `SITEMAP_AUTHOR_MIN_VIDEOS` | `10` | Minimum indexed videos required for an author profile URL to enter the sitemap. |
 
 The availability checker runs inside the scheduler every 10 minutes by default. Each run takes a lock at `/data/cache/.media-availability-check.lock`, selects due videos, builds candidate URLs from `videoUrl`, `fallbackUrls`, and the author's cached kind-10063 Blossom server list, then validates candidates with HTTP `HEAD`. Results are written to the durable `media_availability` index and patched back into `videos`.
 

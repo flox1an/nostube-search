@@ -22,6 +22,7 @@ import {
 import { blockedAuthorPubkeys, isBlockedAuthorPubkey } from './blocked-authors.js'
 import { filterVerifiedEvents } from '../nostr-events.js'
 import { firstLanguageTag, normalizeLanguage, normalizeLanguages } from '../language.js'
+import { registerSitemapRoutes } from './sitemap.js'
 
 type SearchHit = {
   event_id?: string
@@ -92,6 +93,7 @@ if (!meiliUrl || !meiliMasterKey) {
 }
 
 const app = new Hono()
+registerSitemapRoutes(app, { meiliUrl, meiliMasterKey })
 const corsOrigin = process.env.CORS_ORIGIN?.replace(/^['"]|['"]$/g, '') ?? ''
 if (corsOrigin) {
   app.use('/api/*', cors({ origin: corsOrigin === '*' ? '*' : corsOrigin }))
