@@ -1,4 +1,9 @@
-const NSFW_IDENTIFIER_PREFIXES: readonly string[] = ["xhamster", "porntubeai"];
+const NSFW_IDENTIFIER_PREFIXES: readonly string[] = [
+  "xhamster",
+  "porntubeai",
+  "pmvhaven",
+];
+const NSFW_CLIENTS: readonly string[] = ["porntubeai", "pmvhaven"];
 
 export function hasNsfwPlatformAttributes(tags: string[][]): boolean {
   return tags.some(([name, value]) => {
@@ -17,7 +22,7 @@ export function hasNsfwPlatformAttributes(tags: string[][]): boolean {
     }
 
     if (name === "client") {
-      return normalizedValue === "porntubeai";
+      return NSFW_CLIENTS.includes(normalizedValue);
     }
 
     return false;

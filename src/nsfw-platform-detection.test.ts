@@ -30,6 +30,14 @@ describe("NSFW platform detection", () => {
     assert.equal(hasNsfwPlatformAttributes([["client", " PornTubeAI "]]), true);
   });
 
+  it("detects PMVHaven d prefixes and client values case-insensitively", () => {
+    assert.equal(
+      hasNsfwPlatformAttributes([["d", "  PMVHAVEN-6a44843ecd1d5ca72c761a89"]]),
+      true,
+    );
+    assert.equal(hasNsfwPlatformAttributes([["client", " PMVHaven "]]), true);
+  });
+
   it("detects a matching value in any repeated d or source tag", () => {
     assert.equal(
       hasNsfwPlatformAttributes([
