@@ -44,6 +44,7 @@ import {
 } from './people-index.js';
 import { readState, writeState, setStatePath } from './state.js';
 import { firstLanguageTag, normalizeLanguage } from '../language.js';
+import { getExplicitContentWarning, hasNsfwPlatformAttributes } from '../nsfw-platform-detection.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -482,7 +483,8 @@ async function toSearchDocument(
     : row.event_id;
   const nostrUrl = generateNostubeUrl({ event_id: row.event_id, pubkey: row.pubkey, kind: row.kind, d_tag: dTag });
   const thumbnail = candidateThumbnails[0] ?? null;
-  const contentWarning = firstTagValue(tags, 'content-warning');
+  const contentWarning = getExplicitContentWarning(tags)
+    ?? (hasNsfwPlatformAttributes(tags) ? 'NSFW' : null);
   const isShort = row.kind === 22 || row.kind === 34236;
   const isVideo = row.kind === 21 || row.kind === 34235;
   const isNostrNative = !origins.some(origin => origin.platform?.toLowerCase() === 'youtube') && !isYouTubeUrl(videoUrl);
@@ -1111,7 +1113,13 @@ async function main(): Promise<void> {
     console.log('[Indexer] FETCH_TRUST_SCORES disabled — using default 0.5 for all documents');
   }
 
+  const forceFullReindex = process.env.FORCE_FULL_REINDEX === 'true';
+
   try {
+    if (forceFullReindex) {
+      console.log('[Indexer] FORCE_FULL_REINDEX enabled — starting full re-index.');
+      await fullReindex(client, sourceRelays, trustClientConnected);
+    }
     await runScheduler(client, sourceRelays, trustClientConnected);
   } finally {
     await disconnectTrustScoreClient();

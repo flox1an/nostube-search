@@ -175,6 +175,7 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `TRUST_CACHE_TTL_MS` | `86400000` | Trust score cache TTL (ms, default 24 h). Stored at `/data/cache/.trust-cache.json` in the `api_cache` volume. |
 | `INDEXER_INCREMENTAL_INTERVAL_MS` | `600000` | How often the indexer fetches and upserts new events (ms, default 10 min). |
 | `INDEXER_FULL_INTERVAL_MS` | `86400000` | How often a full re-index runs (ms, default 24 h). Uses a rolling index swap — the live index stays queryable throughout. |
+| `FORCE_FULL_REINDEX` | `false` | Set to `true` temporarily to run a rolling-swap full re-index at startup. Remove it after completion. |
 | `MEDIA_AVAILABILITY_CHECK_INTERVAL_MS` | `600000` | How often the media availability checker runs (ms, default 10 min). |
 | `MEDIA_AVAILABILITY_CHECK_BATCH_SIZE` | `100` | Maximum videos checked per availability run. |
 | `MEDIA_AVAILABILITY_HEAD_TIMEOUT_MS` | `5000` | Timeout for each media `HEAD` request. |
