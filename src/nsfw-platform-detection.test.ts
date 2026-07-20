@@ -22,6 +22,14 @@ describe("NSFW platform detection", () => {
     assert.equal(hasNsfwPlatformAttributes([["source", " XhAmStEr "]]), true);
   });
 
+  it("detects PornTubeAI d prefixes and client values case-insensitively", () => {
+    assert.equal(
+      hasNsfwPlatformAttributes([["d", "  PORNTUBEAI-video"]]),
+      true,
+    );
+    assert.equal(hasNsfwPlatformAttributes([["client", " PornTubeAI "]]), true);
+  });
+
   it("detects a matching value in any repeated d or source tag", () => {
     assert.equal(
       hasNsfwPlatformAttributes([
