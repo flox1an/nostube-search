@@ -19,8 +19,17 @@ import {
   type RecommendationSearchHit,
   type UserRecommendationProfile,
 } from './recommendations.js'
-import { blockedAuthorPubkeys, isBlockedAuthorPubkey } from './blocked-authors.js'
+import {
+  buildPresetFilters,
+  isValidNsfwFilter,
+  isValidPresetPubkey,
+  isAuthorBlockedOrNsfw,
+  presetStore,
+  type NsfwFilter,
+  type PresetPolicy,
+} from './preset-safety.js'
 import { filterVerifiedEvents } from '../nostr-events.js'
+import { blockedAuthorPubkeys, isBlockedAuthorPubkey } from './blocked-authors.js'
 import { firstLanguageTag, normalizeLanguage, normalizeLanguages } from '../language.js'
 import { registerSitemapRoutes } from './sitemap.js'
 
@@ -677,16 +686,42 @@ function recommendationLanguageCacheKey(language?: string | string[] | null): st
   return normalizeLanguages(language).join(',') || 'auto'
 }
 
-function relatedCandidateCacheKey(source: SearchHit, input: {
-  language?: string | string[] | null
-  limit: number
-  excludeContentWarnings: boolean
-}): string {
+function addPresetFiltersToArray(
+  filters: string[],
+  presetFilters: string[],
+): string[] {
+  return [...filters, ...presetFilters]
+}
+
+function annotateNsfwHits(hits: SearchHit[], policy: PresetPolicy, nsfwFilter: NsfwFilter): SearchHit[] {
+  if (nsfwFilter !== 'warning') return hits
+  const nsfwSet = new Set(policy.nsfwPubkeys)
+  return hits.map(hit => {
+    if (hit.pubkey && nsfwSet.has(hit.pubkey.toLowerCase())) {
+      return { ...hit, contentWarning: 'NSFW' }
+    }
+    return hit
+  })
+}
+
+function relatedCandidateCacheKey(
+  source: SearchHit,
+  input: {
+    language?: string | string[] | null
+    limit: number
+    excludeContentWarnings: boolean
+    presetPubkey?: string
+    presetRevision?: number
+    nsfwFilter?: NsfwFilter
+  },
+): string {
+  const presetPart = [input.presetPubkey ?? '', input.presetRevision ?? '', input.nsfwFilter ?? ''].join(':')
   return [
     sourceIdentityKey(source),
     `limit:${input.limit}`,
     `language:${recommendationLanguageCacheKey(input.language)}`,
     `excludeContentWarnings:${input.excludeContentWarnings}`,
+    presetPart ? `preset:${presetPart}` : '',
   ].join('|')
 }
 
@@ -694,6 +729,10 @@ async function getRelatedCandidates(source: SearchHit, input: {
   language?: string | string[] | null
   limit: number
   excludeContentWarnings: boolean
+  presetFilters?: string[]
+  presetPubkey?: string
+  presetRevision?: number
+  nsfwFilter?: NsfwFilter
 }): Promise<SearchHit[]> {
   return relatedCandidateCache.getOrCreate(
     relatedCandidateCacheKey(source, input),
@@ -702,20 +741,22 @@ async function getRelatedCandidates(source: SearchHit, input: {
   )
 }
 
+
 async function fetchRelatedCandidates(source: SearchHit, input: {
   language?: string | string[] | null
   limit: number
   excludeContentWarnings: boolean
+  presetFilters?: string[]
 }): Promise<SearchHit[]> {
   const candidateLimit = Math.max(input.limit * 4, input.limit)
+  const preset = input.presetFilters ?? []
   const typeFilters = [
     ...recommendationCandidateFilters(source),
     ...recommendationLanguageFilters(source, input.language),
+    ...preset,
   ]
 
-  // Stage 1: similarity search — MeiliSearch stops at the first term combination
-  // that finds any results (matchingStrategy "last"), so niche/foreign content
-  // may only yield a handful of hits.
+  // Stage 1: similarity search
   const simResult = await meiliSearch({
     q: recommendationQuery(source),
     limit: candidateLimit,
@@ -726,11 +767,7 @@ async function fetchRelatedCandidates(source: SearchHit, input: {
 
   const allHits: SearchHit[] = [...(simResult.hits ?? [])]
 
-  // Stage 2: if the similarity search came up short, pull in a few videos from the
-  // same author so their other work can appear in the sidebar. Capped to ~30% of the
-  // requested limit so stage 3 (popular/diverse) always has room to contribute — without
-  // this cap an unindexed source video would fill the entire result set with same-author
-  // content and stage 3 would never fire.
+  // Stage 2: author backfill (capped)
   const authorBackfillLimit = Math.max(2, Math.ceil(input.limit * 0.4))
   if (allHits.length < candidateLimit && source.pubkey) {
     const authorFilters = [
@@ -745,14 +782,12 @@ async function fetchRelatedCandidates(source: SearchHit, input: {
       sort: ['rankingScore:desc'],
       showRankingScore: true,
     })
-    // Strip _rankingScore so fill candidates are scored by tag/token overlap,
-    // not by MeiliSearch's empty-query score of 1.0.
     for (const hit of authorResult.hits ?? []) allHits.push({ ...hit, _rankingScore: undefined })
   }
 
   let candidates = filterAndDedupeCandidates(source, allHits, input.excludeContentWarnings)
 
-  // Stage 3: if still under limit, pad with popular videos of the same type.
+  // Stage 3: popular padding
   if (candidates.length < input.limit) {
     const popularResult = await meiliSearch({
       q: '',
@@ -775,6 +810,10 @@ async function relatedVideos(input: {
   language?: string | string[] | null
   limit: number
   excludeContentWarnings: boolean
+  presetFilters?: string[]
+  presetPubkey?: string
+  presetRevision?: number
+  nsfwFilter?: NsfwFilter
 }) {
   const source = await findVideoByRef(input.videoRef)
   if (!source) return null
@@ -799,8 +838,7 @@ async function relatedVideos(input: {
     })
     .sort((a, b) => b.score - a.score)
 
-  // Diversity pass: limit same-source-author videos to ~30% of results so unindexed
-  // videos with no similarity signal don't flood the list with one author's content.
+  // Diversity pass
   const maxSameAuthor = Math.max(2, Math.floor(input.limit * 0.3))
   const ranked: typeof sorted = []
   const deferred: typeof sorted = []
@@ -814,32 +852,52 @@ async function relatedVideos(input: {
       ranked.push(item)
     }
   }
-  // Fill any remaining slots with deferred same-author candidates
   for (const item of deferred) {
     if (ranked.length >= input.limit) break
     ranked.push(item)
   }
 
-  return ranked.map(({ candidate, score }) => mapRecommendationHit(candidate as RecommendationSearchHit, score))
+  const results = ranked.map(({ candidate, score }) => mapRecommendationHit(candidate as RecommendationSearchHit, score))
+  return results
 }
 
+
+
 app.get('/api/search', async c => {
+  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
+  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+
+  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
+    return c.json({ code: 'preset_required' }, 400)
+  }
+  if (!isValidNsfwFilter(nsfwFilterRaw)) {
+    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
+  }
+
+  const policy = await presetStore.getPreset(presetPubkey)
+  if (!policy) {
+    return c.json({ code: 'preset_unavailable' }, 503)
+  }
+
   const q = (c.req.query('q') ?? '').trim()
   if (!q) return c.json({ error: 'Missing query parameter q' }, 400)
 
   const limit = toInt(c.req.query('limit'), 20)
   const offset = toInt(c.req.query('offset'), 0)
   const sort = parseSort(c.req.query('sort'))
-  const filter = parseSearchFilters({
-    type: c.req.query('type'),
-    duration: c.req.query('duration'),
-    date: c.req.query('date'),
-    available: c.req.query('available'),
-    feature: c.req.queries('feature') ?? c.req.query('feature'),
-    kinds: c.req.queries('kinds') ?? c.req.query('kinds'),
-    language: c.req.queries('language') ?? c.req.query('language'),
-    captionLanguage: c.req.queries('captionLanguage') ?? c.req.query('captionLanguage'),
-  })
+  const filter = [
+    ...parseSearchFilters({
+      type: c.req.query('type'),
+      duration: c.req.query('duration'),
+      date: c.req.query('date'),
+      available: c.req.query('available'),
+      feature: c.req.queries('feature') ?? c.req.query('feature'),
+      kinds: c.req.queries('kinds') ?? c.req.query('kinds'),
+      language: c.req.queries('language') ?? c.req.query('language'),
+      captionLanguage: c.req.queries('captionLanguage') ?? c.req.query('captionLanguage'),
+    }),
+    ...buildPresetFilters(policy, nsfwFilterRaw),
+  ]
 
   try {
     const result = await meiliSearch({
@@ -849,7 +907,7 @@ app.get('/api/search', async c => {
       ...(sort ? { sort: [sort] } : {}),
       ...(filter.length > 0 ? { filter } : {}),
     })
-    const hits = (result.hits ?? []).map(mapHit)
+    const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilterRaw)
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
 
     return c.json({ hits, total, limit, offset })
@@ -860,6 +918,21 @@ app.get('/api/search', async c => {
 })
 
 app.get('/api/tags', async c => {
+  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
+  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+
+  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
+    return c.json({ code: 'preset_required' }, 400)
+  }
+  if (!isValidNsfwFilter(nsfwFilterRaw)) {
+    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
+  }
+
+  const policy = await presetStore.getPreset(presetPubkey)
+  if (!policy) {
+    return c.json({ code: 'preset_unavailable' }, 503)
+  }
+
   const t = (c.req.query('t') ?? '').trim().toLowerCase()
   if (!t) return c.json({ error: 'Missing query parameter t' }, 400)
 
@@ -878,6 +951,7 @@ app.get('/api/tags', async c => {
       language: c.req.queries('language') ?? c.req.query('language'),
       captionLanguage: c.req.queries('captionLanguage') ?? c.req.query('captionLanguage'),
     }),
+    ...buildPresetFilters(policy, nsfwFilterRaw),
   ]
 
   try {
@@ -888,7 +962,7 @@ app.get('/api/tags', async c => {
       ...(sort ? { sort: [sort] } : {}),
       filter,
     })
-    const hits = (result.hits ?? []).map(mapHit)
+    const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilterRaw)
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
     return c.json({ hits, total, limit, offset })
   } catch (err) {
@@ -912,11 +986,43 @@ type PeopleHit = {
 }
 
 app.get('/api/people', async c => {
+  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
+  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+
+  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
+    return c.json({ code: 'preset_required' }, 400)
+  }
+  if (!isValidNsfwFilter(nsfwFilterRaw)) {
+    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
+  }
+
+  const policy = await presetStore.getPreset(presetPubkey)
+  if (!policy) {
+    return c.json({ code: 'preset_unavailable' }, 503)
+  }
+
   const q = (c.req.query('q') ?? '').trim()
   if (!q) return c.json({ error: 'Missing query parameter q' }, 400)
 
   const limit = toInt(c.req.query('limit'), 10)
   const offset = toInt(c.req.query('offset'), 0)
+
+  // Build a Meili filter that excludes blocked and NSFW (on hide) pubkeys from the people index
+  const blockedOrNsfwPubkeys: string[] = []
+  for (const pk of policy.blockedPubkeys) {
+    blockedOrNsfwPubkeys.push(pk)
+  }
+  if (nsfwFilterRaw === 'hide') {
+    for (const pk of policy.nsfwPubkeys) {
+      blockedOrNsfwPubkeys.push(pk)
+    }
+  }
+
+  const peopleFilter: string[] = []
+  if (blockedOrNsfwPubkeys.length > 0) {
+    const clauses = blockedOrNsfwPubkeys.map(pk => `pubkey != "${pk}"`)
+    peopleFilter.push(`(${clauses.join(' AND ')})`)
+  }
 
   try {
     const res = await fetch(`${meiliUrl}/indexes/people/search`, {
@@ -930,6 +1036,7 @@ app.get('/api/people', async c => {
         limit,
         offset,
         sort: ['videoCount:desc'],
+        ...(peopleFilter.length > 0 ? { filter: peopleFilter } : {}),
       }),
     })
 
@@ -954,11 +1061,28 @@ app.get('/api/people', async c => {
 })
 
 app.get('/api/search/suggest', async c => {
+  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
+  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+
+  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
+    return c.json({ code: 'preset_required' }, 400)
+  }
+  if (!isValidNsfwFilter(nsfwFilterRaw)) {
+    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
+  }
+
+  const policy = await presetStore.getPreset(presetPubkey)
+  if (!policy) {
+    return c.json({ code: 'preset_unavailable' }, 503)
+  }
+
   const q = (c.req.query('q') ?? '').trim()
   if (!q) return c.json({ suggestions: [] })
 
+  const presetFilters = buildPresetFilters(policy, nsfwFilterRaw)
+
   try {
-    const result = await meiliSearch({ q, limit: 10, offset: 0 })
+    const result = await meiliSearch({ q, limit: 10, offset: 0, filter: presetFilters.length > 0 ? presetFilters : undefined })
     const suggestions = [...new Set(excludeKnownUnavailableHits(result.hits ?? []).map(hit => (hit.title ?? '').trim()).filter(Boolean))]
       .slice(0, 5)
     return c.json({ suggestions })
@@ -1001,12 +1125,30 @@ app.post('/api/recommendations/related', async c => {
     limit?: unknown
     language?: unknown
     excludeContentWarnings?: unknown
+    presetPubkey?: unknown
+    nsfwFilter?: unknown
   }
 
   try {
     body = await c.req.json()
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400)
+  }
+
+  // Validate preset policy parameters from body
+  const presetPubkeyRaw = typeof body.presetPubkey === 'string' ? body.presetPubkey.trim() : ''
+  const nsfwFilterRaw = typeof body.nsfwFilter === 'string' ? body.nsfwFilter.trim() : ''
+
+  if (!presetPubkeyRaw || !isValidPresetPubkey(presetPubkeyRaw)) {
+    return c.json({ code: 'preset_required' }, 400)
+  }
+  if (!isValidNsfwFilter(nsfwFilterRaw)) {
+    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
+  }
+
+  const policy = await presetStore.getPreset(presetPubkeyRaw)
+  if (!policy) {
+    return c.json({ code: 'preset_unavailable' }, 503)
   }
 
   if (typeof body.videoRef !== 'string' || !body.videoRef.trim()) {
@@ -1021,6 +1163,8 @@ app.post('/api/recommendations/related', async c => {
     ? body.excludeContentWarnings
     : true
 
+  const presetFilters = buildPresetFilters(policy, nsfwFilterRaw)
+
   try {
     const hits = await relatedVideos({
       videoRef: body.videoRef,
@@ -1032,10 +1176,19 @@ app.post('/api/recommendations/related', async c => {
           : undefined,
       limit,
       excludeContentWarnings,
+      presetFilters: presetFilters.length > 0 ? presetFilters : undefined,
+      presetPubkey: presetPubkeyRaw,
+      presetRevision: policy.revision,
+      nsfwFilter: nsfwFilterRaw,
     })
 
-    if (!hits) return c.json({ error: 'Video not found' }, 404)
-    return c.json({ hits, total: hits.length, limit })
+    // Annotate NSFW warning hits
+    const annotated = nsfwFilterRaw === 'warning'
+      ? annotateNsfwHits(hits ?? [], policy, nsfwFilterRaw)
+      : hits
+
+    if (!annotated) return c.json({ error: 'Video not found' }, 404)
+    return c.json({ hits: annotated, total: annotated.length, limit })
   } catch (err) {
     if (err instanceof Error && (
       err.message.startsWith('Unsupported videoRef') ||

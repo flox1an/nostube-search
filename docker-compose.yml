@@ -49,6 +49,9 @@ services:
       MEDIA_AVAILABILITY_LOCK_PATH: /data/cache/.media-availability-check.lock
       MEDIA_AVAILABILITY_LOCK_STALE_MS: ${MEDIA_AVAILABILITY_LOCK_STALE_MS:-1800000}
       CORS_ORIGIN: ${CORS_ORIGIN:-}
+      NOSTR_PRESET_RELAYS: ${NOSTR_PRESET_RELAYS:-}
+      PRESET_CACHE_FRESH_TTL_MS: ${PRESET_CACHE_FRESH_TTL_MS:-300000}
+      PRESET_CACHE_MAX_TTL_MS: ${PRESET_CACHE_MAX_TTL_MS:-1800000}
     volumes:
       - api_cache:/data/cache
     depends_on:

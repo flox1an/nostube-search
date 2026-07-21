@@ -33,12 +33,13 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 ---
 
 ## Endpoints
-
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/search?q=<query>` | Full-text video search |
-| `GET` | `/api/search/suggest?q=<query>` | Title suggestions (up to 5) |
-| `GET` | `/api/search/completion?prefix=<prefix>` | Word-level prefix completion |
+| `GET` | `/api/search?q=<query>` | Full-text video search (requires presetPubkey and nsfwFilter) |
+| `GET` | `/api/search/suggest?q=<query>` | Title suggestions (requires presetPubkey and nsfwFilter) |
+| `GET` | `/api/search/completion?prefix=<prefix>` | Word-level prefix completion (unfiltered) |
+| `GET` | `/api/tags?t=<tag>` | Browse videos by tag (requires presetPubkey and nsfwFilter) |
+| `GET` | `/api/people?q=<query>` | Author search (requires presetPubkey and nsfwFilter) |
 | `GET` | `/health` | API + MeiliSearch health check |
 | `GET` | `/sitemap.xml` | SEO sitemap with top Nostube video/short URLs plus important authors |
 | `GET` | `/` | Built-in search UI |
@@ -126,20 +127,49 @@ Up to 5 distinct non-empty titles matching `q`.
 ```json
 { "completions": ["bitcoin", "blockchain", "..."] }
 ```
-
-Up to 10 indexed words whose prefix matches the `prefix` parameter (minimum 1 character).
-
-**Error responses:**
-
-| Status | Body | Condition |
-|--------|------|-----------|
 | `400` | `{"error":"Missing query parameter q"}` | `q` is absent or blank on `/api/search` |
+| `400` | `{"code":"preset_required"}` | `presetPubkey` is missing or not a 64-char hex on a protected endpoint |
+| `400` | `{"error":"Invalid nsfwFilter: ..."}` | `nsfwFilter` is not one of `hide|warning|show` |
+| `503` | `{"code":"preset_unavailable"}` | No valid safety preset could be loaded from relays or cache |
 | `502` | `{"error":"Search engine unavailable"}` | MeiliSearch unreachable or returned an error |
 
 ---
 
-## Environment variables
+## Safety Presets (NIP-78)
 
+Protected endpoints require `presetPubkey` (a 64-char hex pubkey) and `nsfwFilter`
+(one of `hide`, `warning`, `show`). The server fetches the author's NIP-78 kind-30078
+event with d-tag `nostube-presets` to obtain a safety policy.
+
+**Policy fields (JSON arrays in the event content):**
+
+| Field | Description |
+|-------|-------------|
+| `blockedPubkeys` | Authors whose content is always hidden |
+| `nsfwPubkeys` | NSFW authors; behavior depends on nsfwFilter |
+| `blockedEvents` | Specific events always hidden |
+
+**nsfwFilter behaviour:**
+
+| Value | Behaviour |
+|-------|-----------|
+| `hide` | NSFW authors are excluded from results entirely |
+| `warning` | NSFW author hits are included with `contentWarning: "NSFW"` |
+| `show` | NSFW authors appear without any annotation |
+
+The preset is cached with stale-while-revalidate (fresh 5 min, stale up to 30 min).
+Blocked pubkeys and events are always silently filtered regardless of `nsfwFilter`.
+
+### Protected endpoints
+
+These endpoints reject requests without valid `presetPubkey`:
+- `GET /api/search`
+- `GET /api/tags`
+- `GET /api/people`
+- `GET /api/search/suggest`
+- `POST /api/recommendations/related` (preset parameters are in the JSON body)
+
+`GET /api/search/completion` is unfiltered and does not require preset parameters.
 Copy `.env.example` to `.env` and adjust as needed.
 
 ### Required
@@ -186,6 +216,14 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `SITEMAP_MAX_URLS` | `50000` | Maximum total sitemap entries. Capped at the protocol limit of 50,000. |
 | `SITEMAP_MAX_AUTHORS` | `5000` | Maximum author profile URLs reserved inside the sitemap. |
 | `SITEMAP_AUTHOR_MIN_VIDEOS` | `10` | Minimum indexed videos required for an author profile URL to enter the sitemap. |
+
+### Safety preset service
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NOSTR_PRESET_RELAYS` | _(NOSTR_INDEX_RELAYS)_ | Comma-separated relay URLs used to fetch NIP-78 preset events (kind 30078). Falls back to `NOSTR_INDEX_RELAYS`. |
+| `PRESET_CACHE_FRESH_TTL_MS` | `300000` | How long a cached preset policy is considered fresh (ms, default 5 min). |
+| `PRESET_CACHE_MAX_TTL_MS` | `1800000` | Maximum age for a stale preset policy before a full miss (ms, default 30 min). |
 
 The availability checker runs inside the scheduler every 10 minutes by default. Each run takes a lock at `/data/cache/.media-availability-check.lock`, selects due videos, builds candidate URLs from `videoUrl`, `fallbackUrls`, and the author's cached kind-10063 Blossom server list, then validates candidates with HTTP `HEAD`. Results are written to the durable `media_availability` index and patched back into `videos`.
 
