@@ -125,11 +125,52 @@ describe('parsePresetEvent', () => {
     assert.equal(parsePresetEvent(event), null);
   });
 
-  it('rejects object with unknown keys', () => {
-    const event = make30078Event({
-      content: JSON.stringify({ blockedPubkeys: [], extraField: 'bad' }),
-    });
+  it('rejects JSON null (must be object)', () => {
+    const event = make30078Event({ content: 'null' });
     assert.equal(parsePresetEvent(event), null);
+  });
+
+  it('accepts auxiliary unknown keys alongside valid filter arrays', () => {
+    const event = make30078Event({
+      content: JSON.stringify({
+        blockedPubkeys: [AAA],
+        nsfwPubkeys: [],
+        blockedEvents: [],
+        extraField: 'should-be-ignored',
+      }),
+    });
+    const result = parsePresetEvent(event);
+    assert.notEqual(result, null);
+    assert.deepEqual(result!.blockedPubkeys, [AAA.toLowerCase()]);
+    assert.deepEqual(result!.nsfwPubkeys, []);
+    assert.deepEqual(result!.blockedEvents, []);
+  });
+
+  it('accepts Nostube preset with defaultRelays and defaultThumbResizeServer', () => {
+    const event = make30078Event({
+      content: JSON.stringify({
+        defaultRelays: ['wss://relay.nostube.com', 'wss://relay.damus.io'],
+        defaultThumbResizeServer: '/api/thumb',
+        blockedPubkeys: [AAA, BBB],
+        nsfwPubkeys: [],
+        blockedEvents: [CCC],
+      }),
+    });
+    const result = parsePresetEvent(event);
+    assert.notEqual(result, null);
+    assert.deepEqual(result!.blockedPubkeys, [AAA.toLowerCase(), BBB.toLowerCase()]);
+    assert.deepEqual(result!.nsfwPubkeys, []);
+    assert.deepEqual(result!.blockedEvents, [CCC.toLowerCase()]);
+    assert.equal(result!.revision, 1_000_000);
+    assert.equal(result!.eventId, BBB);
+    // Ensure only the three safety-filter fields are in the policy
+    assert.deepEqual(Object.keys(result!).sort(), [
+      'blockedEvents',
+      'blockedPubkeys',
+      'eventId',
+      'nsfwPubkeys',
+      'revision',
+    ]);
   });
 
   it('rejects oversized blockedPubkeys array', () => {

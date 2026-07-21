@@ -45,23 +45,28 @@ const MAX_BLOCKED_EVENTS = 1000;
 /**
  * Parse and validate preset content.
  *
- * Content must be a plain JSON object with at most the three known keys.
- * Each array must contain only 64-char hex strings (lowercased, deduplicated).
- * Any array exceeding its limit or any unknown key causes full rejection.
- * Empty arrays are valid.
+ * Only three fields are consumed and validated:
+ *   - `blockedPubkeys` — array of 64-char hex pubkeys (max 1000)
+ *   - `nsfwPubkeys`    — array of 64-char hex pubkeys (max 1000)
+ *   - `blockedEvents`  — array of 64-char hex event ids (max 1000)
+ *
+ * Any additional/unknown keys (e.g. `defaultRelays`, `defaultThumbResizeServer`)
+ * are silently ignored to maintain compatibility with Nostube's official preset
+ * event format.
+ *
+ * Returns `null` when content is not an object, any filter field is missing,
+ * non-array, contains non-hex values, or exceeds its size limit.
  */
 function validatePresetContent(
   content: unknown,
 ): { blockedPubkeys: string[]; nsfwPubkeys: string[]; blockedEvents: string[] } | null {
-  if (typeof content !== 'object' || content === null) return null;
-  if (Array.isArray(content)) return null;
-
+  if (typeof content !== 'object' || content === null || Array.isArray(content)) return null;
   const obj = content as Record<string, unknown>;
-  const allowedKeys: Record<string, true> = { blockedPubkeys: true, nsfwPubkeys: true, blockedEvents: true };
 
-  for (const key of Object.keys(obj)) {
-    if (!(key in allowedKeys)) return null;
-  }
+  // Only three safety-filter fields are extracted; all other keys are ignored.
+  // This allows NIP-78 preset events with auxiliary configuration fields
+  // (e.g. defaultRelays, defaultThumbResizeServer) to be accepted without
+  // breaking validation.
 
   const blockedPubkeys = normalizeHexArray(obj.blockedPubkeys);
   if (!blockedPubkeys) return null;
