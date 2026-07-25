@@ -1,4 +1,4 @@
-import { type Index, MeiliSearch } from 'meilisearch';
+import { type Index, Meilisearch } from 'meilisearch';
 
 export const MEDIA_AVAILABILITY_INDEX_UID = 'media_availability';
 
@@ -110,20 +110,20 @@ export function snapshotFromAvailability(
   };
 }
 
-export async function applyMediaAvailabilityIndexSettings(client: MeiliSearch): Promise<void> {
+export async function applyMediaAvailabilityIndexSettings(client: Meilisearch): Promise<void> {
   const task = await client.index(MEDIA_AVAILABILITY_INDEX_UID).updateSettings({
     filterableAttributes: ['id', 'mediaKey', 'status', 'checkedAt', 'retryAfter'],
     sortableAttributes: ['checkedAt', 'retryAfter', 'attempts'],
   });
-  await client.waitForTask(task.taskUid);
+  await client.tasks.waitForTask(task.taskUid);
 }
 
-export async function ensureMediaAvailabilityIndex(client: MeiliSearch): Promise<Index> {
+export async function ensureMediaAvailabilityIndex(client: Meilisearch): Promise<Index> {
   try {
     await client.getIndex(MEDIA_AVAILABILITY_INDEX_UID);
   } catch {
     const task = await client.createIndex(MEDIA_AVAILABILITY_INDEX_UID, { primaryKey: 'id' });
-    await client.waitForTask(task.taskUid);
+    await client.tasks.waitForTask(task.taskUid);
   }
 
   await applyMediaAvailabilityIndexSettings(client);

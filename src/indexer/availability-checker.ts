@@ -1,6 +1,6 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { MeiliSearch, type Index } from 'meilisearch';
+import { Meilisearch, type Index } from 'meilisearch';
 
 import { fetchAuthorBlossomServers } from './blossom-lists.js';
 import {
@@ -234,7 +234,7 @@ function toAvailabilityDoc(input: {
 }
 
 export async function runMediaAvailabilityCheck(
-  client: MeiliSearch,
+  client: Meilisearch,
   videosIndex: Index,
   availabilityIndex: Index,
 ): Promise<void> {
@@ -303,8 +303,8 @@ export async function runMediaAvailabilityCheck(
       const availabilityTask = await availabilityIndex.addDocuments(availabilityDocs);
       const videosTask = await videosIndex.updateDocuments(videoPatches);
       await Promise.all([
-        client.waitForTask(availabilityTask.taskUid),
-        client.waitForTask(videosTask.taskUid),
+        client.tasks.waitForTask(availabilityTask.taskUid),
+        client.tasks.waitForTask(videosTask.taskUid),
       ]);
     }
 

@@ -7,7 +7,7 @@
  */
 
 import { nip19 } from 'nostr-tools';
-import type { MeiliSearch } from 'meilisearch';
+import type { Meilisearch } from 'meilisearch';
 
 import type { AuthorProfile } from './scoring.js';
 
@@ -29,7 +29,7 @@ export type PeopleDocument = {
   updatedAt: number;
 };
 
-export async function applyPeopleIndexSettings(client: MeiliSearch, uid: string): Promise<void> {
+export async function applyPeopleIndexSettings(client: Meilisearch, uid: string): Promise<void> {
   const task = await client.index(uid).updateSettings({
     searchableAttributes: [
       'name', 'display_name', 'username', 'about', 'nip05', 'npub', 'pubkey',
@@ -41,16 +41,16 @@ export async function applyPeopleIndexSettings(client: MeiliSearch, uid: string)
       'videoCount:desc', 'globalTrustScore:desc',
     ],
   });
-  await client.waitForTask(task.taskUid);
+  await client.tasks.waitForTask(task.taskUid);
 }
 
-export async function ensurePeopleIndex(client: MeiliSearch): Promise<void> {
+export async function ensurePeopleIndex(client: Meilisearch): Promise<void> {
   try {
     await client.getIndex(PEOPLE_INDEX_UID);
     await applyPeopleIndexSettings(client, PEOPLE_INDEX_UID);
   } catch {
     const task = await client.createIndex(PEOPLE_INDEX_UID, { primaryKey: 'pubkey' });
-    await client.waitForTask(task.taskUid);
+    await client.tasks.waitForTask(task.taskUid);
     await applyPeopleIndexSettings(client, PEOPLE_INDEX_UID);
   }
 }
@@ -91,7 +91,7 @@ export function buildPeopleDocuments(
 const UPSERT_BATCH = 500;
 
 export async function upsertPeopleDocuments(
-  client: MeiliSearch,
+  client: Meilisearch,
   docs: PeopleDocument[],
 ): Promise<void> {
   if (docs.length === 0) return;
@@ -99,7 +99,7 @@ export async function upsertPeopleDocuments(
   for (let i = 0; i < docs.length; i += UPSERT_BATCH) {
     const batch = docs.slice(i, i + UPSERT_BATCH);
     const task = await client.index(PEOPLE_INDEX_UID).addDocuments(batch, { primaryKey: 'pubkey' });
-    await client.waitForTask(task.taskUid);
+    await client.tasks.waitForTask(task.taskUid);
     console.log(`[People] Upserted ${Math.min(i + UPSERT_BATCH, docs.length)}/${docs.length} people`);
   }
 }

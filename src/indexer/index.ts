@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { MeiliSearch, type Index } from 'meilisearch';
+import { Meilisearch, type Index } from 'meilisearch';
 import { nip19, type Event } from 'nostr-tools';
 
 import {
@@ -584,7 +584,7 @@ async function toSearchDocument(
 
 // ── Index management ──────────────────────────────────────────────────────────
 
-async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promise<void> {
+async function applyVideoIndexSettings(client: Meilisearch, uid: string): Promise<void> {
   const task = await client.index(uid).updateSettings({
     searchableAttributes: ['title', 'tags', 'summary', 'content_preview', 'content', 'authorDisplayName'],
     filterableAttributes: [
@@ -603,23 +603,23 @@ async function applyVideoIndexSettings(client: MeiliSearch, uid: string): Promis
       'rankingScore:desc', 'playlistScore:desc', 'created_at:desc',
     ],
   });
-  await client.waitForTask(task.taskUid);
+  await client.tasks.waitForTask(task.taskUid);
 }
 
-async function applyTermsIndexSettings(client: MeiliSearch, uid: string): Promise<void> {
+async function applyTermsIndexSettings(client: Meilisearch, uid: string): Promise<void> {
   const task = await client.index(uid).updateSettings({
     searchableAttributes: ['word'],
     sortableAttributes: ['count'],
     rankingRules: ['words', 'typo', 'proximity', 'attribute', 'exactness', 'count:desc'],
     typoTolerance: { minWordSizeForTypos: { oneTypo: 100, twoTypos: 100 } },
   });
-  await client.waitForTask(task.taskUid);
+  await client.tasks.waitForTask(task.taskUid);
 }
 
-async function deleteIndexIfExists(client: MeiliSearch, uid: string): Promise<void> {
+async function deleteIndexIfExists(client: Meilisearch, uid: string): Promise<void> {
   try {
     const task = await client.deleteIndex(uid);
-    await client.waitForTask(task.taskUid);
+    await client.tasks.waitForTask(task.taskUid);
   } catch {
     // index does not exist — nothing to do
   }
@@ -627,31 +627,31 @@ async function deleteIndexIfExists(client: MeiliSearch, uid: string): Promise<vo
 
 // Ensures an index exists with correct settings. No-op if already present.
 async function ensureIndexExists(
-  client: MeiliSearch,
+  client: Meilisearch,
   uid: string,
   primaryKey: string,
-  applySettings: (c: MeiliSearch, u: string) => Promise<void>,
+  applySettings: (c: Meilisearch, u: string) => Promise<void>,
 ): Promise<void> {
   try {
     await client.getIndex(uid);
     await applySettings(client, uid);
   } catch {
     const createTask = await client.createIndex(uid, { primaryKey });
-    await client.waitForTask(createTask.taskUid);
+    await client.tasks.waitForTask(createTask.taskUid);
     await applySettings(client, uid);
   }
 }
 
 // Deletes (if present) and re-creates a clean index with correct settings.
 async function createFreshIndex(
-  client: MeiliSearch,
+  client: Meilisearch,
   uid: string,
   primaryKey: string,
-  applySettings: (c: MeiliSearch, u: string) => Promise<void>,
+  applySettings: (c: Meilisearch, u: string) => Promise<void>,
 ): Promise<void> {
   await deleteIndexIfExists(client, uid);
   const createTask = await client.createIndex(uid, { primaryKey });
-  await client.waitForTask(createTask.taskUid);
+  await client.tasks.waitForTask(createTask.taskUid);
   await applySettings(client, uid);
 }
 
@@ -659,7 +659,7 @@ async function createFreshIndex(
 
 // Returns the last enqueued task UID (for waiting before index swap).
 async function upsertTerms(
-  client: MeiliSearch,
+  client: Meilisearch,
   termsUid: string,
   wordCounts: Map<string, number>,
 ): Promise<number | undefined> {
@@ -810,7 +810,7 @@ async function buildPlaylistScoreMap(
 }
 
 async function applyPlaylistScorePass(
-  client: MeiliSearch,
+  client: Meilisearch,
   sourceRelays: string[],
   trustClientConnected: boolean,
 ): Promise<void> {
@@ -834,7 +834,7 @@ async function applyPlaylistScorePass(
     console.log(`[PlaylistScore] Queued update ${Math.min(i + BATCH, updates.length)}/${updates.length}`);
   }
 
-  if (lastTaskUid !== undefined) await client.waitForTask(lastTaskUid);
+  if (lastTaskUid !== undefined) await client.tasks.waitForTask(lastTaskUid);
   writeState({ lastPlaylistScoreAt: Date.now() });
   console.log(`[PlaylistScore] Pass complete — ${scoreMap.size} documents updated.`);
 }
@@ -842,7 +842,7 @@ async function applyPlaylistScorePass(
 // ── Incremental update ────────────────────────────────────────────────────────
 
 async function incrementalUpdate(
-  client: MeiliSearch,
+  client: Meilisearch,
   sourceRelays: string[],
   trustClientConnected: boolean,
   since: number,
@@ -894,7 +894,7 @@ async function incrementalUpdate(
 // ── Full re-index (rolling swap) ──────────────────────────────────────────────
 
 async function fullReindex(
-  client: MeiliSearch,
+  client: Meilisearch,
   sourceRelays: string[],
   trustClientConnected: boolean,
 ): Promise<void> {
@@ -940,16 +940,16 @@ async function fullReindex(
   const lastTermsTaskUid = await upsertTerms(client, TERMS_NEXT_UID, allWordCounts);
 
   // Wait for all enqueued tasks to finish before swapping
-  if (lastVideosTaskUid !== undefined) await client.waitForTask(lastVideosTaskUid);
-  if (lastTermsTaskUid !== undefined) await client.waitForTask(lastTermsTaskUid);
+  if (lastVideosTaskUid !== undefined) await client.tasks.waitForTask(lastVideosTaskUid);
+  if (lastTermsTaskUid !== undefined) await client.tasks.waitForTask(lastTermsTaskUid);
 
   // Atomically swap: videos ↔ videos_next, terms ↔ terms_next
   console.log('[Indexer] Swapping indexes ...');
   const swapTask = await client.swapIndexes([
-    { indexes: [INDEX_UID, INDEX_NEXT_UID] },
-    { indexes: [TERMS_INDEX_UID, TERMS_NEXT_UID] },
+    { indexes: [INDEX_UID, INDEX_NEXT_UID], rename: false },
+    { indexes: [TERMS_INDEX_UID, TERMS_NEXT_UID], rename: false },
   ]);
-  await client.waitForTask(swapTask.taskUid);
+  await client.tasks.waitForTask(swapTask.taskUid);
   console.log('[Indexer] Swap complete. Deleting old data ...');
 
   // _next indexes now hold the previous (old) data — remove them
@@ -977,7 +977,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function runScheduler(
-  client: MeiliSearch,
+  client: Meilisearch,
   sourceRelays: string[],
   trustClientConnected: boolean,
 ): Promise<void> {
@@ -1083,7 +1083,7 @@ async function main(): Promise<void> {
   const sourceRelays = sourceRelaysFromEnv();
   console.log(`[Indexer] Source relays: ${sourceRelays.join(', ')}`);
 
-  const client = new MeiliSearch({ host: meiliUrl, apiKey: meiliMasterKey });
+  const client = new Meilisearch({ host: meiliUrl, apiKey: meiliMasterKey });
   await ensureIndexExists(client, INDEX_UID, 'id', applyVideoIndexSettings);
   await ensureIndexExists(client, TERMS_INDEX_UID, 'id', applyTermsIndexSettings);
   await ensureMediaAvailabilityIndex(client);
