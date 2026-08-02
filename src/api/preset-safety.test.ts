@@ -149,7 +149,7 @@ describe('parsePresetEvent', () => {
   it('accepts Nostube preset with defaultRelays and defaultThumbResizeServer', () => {
     const event = make30078Event({
       content: JSON.stringify({
-        defaultRelays: ['wss://relay.nostube.com', 'wss://relay.damus.io'],
+        defaultRelays: ['wss://relay.nostu.be'],
         defaultThumbResizeServer: '/api/thumb',
         blockedPubkeys: [AAA, BBB],
         nsfwPubkeys: [],
