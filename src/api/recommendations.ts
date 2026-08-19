@@ -84,9 +84,28 @@ export type UserSignalEvent = {
 const HEX_EVENT_ID_RE = /^[a-f0-9]{64}$/i;
 const ADDRESSABLE_KINDS = new Set([34235, 34236]);
 
+/**
+ * TTL cache with an entry ceiling.
+ *
+ * Keys are attacker-influenced (video refs carry relay hints, `user` is any
+ * pubkey), so an unbounded map is a memory-exhaustion primitive: expired
+ * entries are only dropped when the *same* key is read again, which never
+ * happens for one-shot random keys. Every insert therefore sweeps expired
+ * entries and, failing that, evicts oldest-first (Map iterates in insertion
+ * order) to stay under `maxEntries`.
+ */
 export class AsyncTtlCache<K, V> {
   private values = new Map<K, { value: V; expiresAt: number }>();
   private inFlight = new Map<K, Promise<V>>();
+  private readonly maxEntries: number;
+
+  constructor(maxEntries = 5_000) {
+    this.maxEntries = Math.max(1, Math.floor(maxEntries));
+  }
+
+  get size(): number {
+    return this.values.size;
+  }
 
   get(key: K): V | undefined {
     const cached = this.values.get(key);
@@ -99,6 +118,7 @@ export class AsyncTtlCache<K, V> {
   }
 
   set(key: K, value: V, ttlMs: number): void {
+    if (!this.values.has(key)) this.evictFor(1);
     this.values.set(key, { value, expiresAt: Date.now() + ttlMs });
   }
 
@@ -119,6 +139,21 @@ export class AsyncTtlCache<K, V> {
       });
     this.inFlight.set(key, promise);
     return promise;
+  }
+
+  /** Make room for `incoming` new entries: expired first, then oldest-inserted. */
+  private evictFor(incoming: number): void {
+    if (this.values.size + incoming <= this.maxEntries) return;
+
+    const now = Date.now();
+    for (const [key, entry] of this.values) {
+      if (entry.expiresAt <= now) this.values.delete(key);
+    }
+
+    for (const key of this.values.keys()) {
+      if (this.values.size + incoming <= this.maxEntries) break;
+      this.values.delete(key);
+    }
   }
 }
 

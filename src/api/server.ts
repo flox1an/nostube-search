@@ -32,6 +32,10 @@ import { filterVerifiedEvents } from '../nostr-events.js'
 import { blockedAuthorPubkeys, isBlockedAuthorPubkey } from './blocked-authors.js'
 import { firstLanguageTag, normalizeLanguage, normalizeLanguages } from '../language.js'
 import { registerSitemapRoutes } from './sitemap.js'
+import { bodyLimit } from 'hono/body-limit'
+import { createHash } from 'node:crypto'
+import { rateLimit, ruleFromEnv } from './rate-limit.js'
+import { resolveSafeRelayHints, sanitizeRelayHints } from './relay-hints.js'
 
 type SearchHit = {
   event_id?: string
@@ -102,11 +106,34 @@ if (!meiliUrl || !meiliMasterKey) {
 }
 
 const app = new Hono()
-registerSitemapRoutes(app, { meiliUrl, meiliMasterKey })
+
 const corsOrigin = process.env.CORS_ORIGIN?.replace(/^['"]|['"]$/g, '') ?? ''
 if (corsOrigin) {
   app.use('/api/*', cors({ origin: corsOrigin === '*' ? '*' : corsOrigin }))
 }
+
+// Every route is unauthenticated and fans one cheap HTTP request out into
+// several expensive MeiliSearch and/or Nostr relay queries, so an unmetered
+// client is a free amplifier. Middleware must be registered before the routes
+// it guards.
+//
+// `RATE_LIMIT_MAX` is one shared per-client budget across all of `/api/*`
+// (inside a wildcard middleware `routePath` is `/api/*`), sized for a UI that
+// fires completion requests while the user types. Endpoints that cost
+// materially more get their own stricter bucket keyed on their exact path.
+app.use('/api/*', rateLimit(ruleFromEnv('RATE_LIMIT_MAX', 300)))
+app.use('/sitemap.xml', rateLimit(ruleFromEnv('RATE_LIMIT_SITEMAP_MAX', 10)))
+
+// Let a CDN or reverse proxy absorb repeats; without this, identical queries
+// re-hit MeiliSearch on every request.
+app.use('/api/*', async (c, next) => {
+  await next()
+  if (c.req.method === 'GET' && c.res.status === 200 && !c.res.headers.has('cache-control')) {
+    c.header('cache-control', apiCacheControl())
+  }
+})
+
+registerSitemapRoutes(app, { meiliUrl, meiliMasterKey })
 const uiPath = resolve(process.cwd(), 'src/api/public/index.html')
 const ALLOWED_RAW_SORTS = new Set([
   'rankingScore:desc',
@@ -143,9 +170,29 @@ const FEATURE_FILTERS = new Map([
 ])
 const SEARCHABLE_VIDEO_KINDS = new Set([21, 22, 34235, 34236])
 
+// Response and query-cost ceilings. MeiliSearch caps a page at its own
+// `maxTotalHits` (1000), which is still ~1000 full documents per request.
+const MAX_PAGE_LIMIT = 100
+const MAX_PAGE_OFFSET = 1_000
+const MAX_QUERY_LENGTH = 256
+const MAX_VIDEO_REF_LENGTH = 4_096
+const MAX_RECOMMENDATION_BODY_BYTES = 16 * 1_024
+
 function toInt(input: string | undefined, fallback: number): number {
   const n = Number(input)
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
+}
+
+function pageLimit(input: string | undefined, fallback: number): number {
+  return Math.min(toInt(input, fallback), MAX_PAGE_LIMIT)
+}
+
+function pageOffset(input: string | undefined): number {
+  return Math.min(toInt(input, 0), MAX_PAGE_OFFSET)
+}
+
+function apiCacheControl(): string {
+  return `public, max-age=${toInt(process.env.API_CACHE_MAX_AGE_S, 60)}, stale-while-revalidate=${toInt(process.env.API_CACHE_SWR_S, 300)}`
 }
 
 function contentPreview(hit: SearchHit): string {
@@ -359,6 +406,10 @@ function sourceRelaysFromEnv(): string[] {
 
 async function findVideoByRef(videoRef: string): Promise<SearchHit | null> {
   const lookup = parseVideoRef(videoRef)
+  // Relay hints ride in on the client-supplied nevent/naddr. Drop anything
+  // aimed at a non-public host before it can reach the socket layer, and cap
+  // the count so one ref cannot fan out into a connection flood.
+  lookup.relays = sanitizeRelayHints(lookup.relays)
 
   const hit = await sourceVideoCache.getOrCreate(
     videoLookupCacheKey(lookup),
@@ -493,10 +544,16 @@ async function fetchVideoFromRelayHints(lookup: VideoLookup): Promise<SearchHit 
   )
 }
 
+function shortDigest(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16)
+}
+
 function videoLookupCacheKey(lookup: VideoLookup): string {
-  const relayKey = [...lookup.relays].sort().join(',')
+  // Relay hints and naddr identifiers are attacker-supplied and variable
+  // length; fold them into fixed-width digests so cache keys stay bounded.
+  const relayKey = lookup.relays.length === 0 ? '' : shortDigest([...lookup.relays].sort().join(','))
   if (lookup.type === 'event') return `event:${lookup.eventId}:${relayKey}`
-  return `addr:${lookup.kind}:${lookup.pubkey}:${lookup.identifier}:${relayKey}`
+  return `addr:${lookup.kind}:${lookup.pubkey}:${shortDigest(lookup.identifier)}:${relayKey}`
 }
 
 const relayHintVideoCache = new AsyncTtlCache<string, SearchHit | null>()
@@ -507,6 +564,11 @@ function getPositiveEnvMs(name: string, fallback: number): number {
 }
 
 async function fetchVideoFromRelayHintsUncached(lookup: VideoLookup): Promise<SearchHit | null> {
+  // Second gate: a hostname that passes the structural filter can still
+  // resolve into private space, so re-check after DNS.
+  const relays = await resolveSafeRelayHints(lookup.relays)
+  if (relays.length === 0) return null
+
   const pool = new SimplePool({ enablePing: false, enableReconnect: false })
   const maxWait = getPositiveEnvMs('RECOMMENDATION_REF_MAX_WAIT_MS', 5_000)
 
@@ -515,7 +577,7 @@ async function fetchVideoFromRelayHintsUncached(lookup: VideoLookup): Promise<Se
       ? [{ ids: [lookup.eventId], limit: 1 }]
       : [{ kinds: [lookup.kind], authors: [lookup.pubkey], '#d': [lookup.identifier], limit: 1 }]
     const events = await pool.querySync(
-      lookup.relays,
+      relays,
       filter[0],
       { maxWait, label: 'nostube-search-recommendation-ref' },
     )
@@ -879,11 +941,11 @@ app.get('/api/search', async c => {
     return c.json({ code: 'preset_unavailable' }, 503)
   }
 
-  const q = (c.req.query('q') ?? '').trim()
+  const q = (c.req.query('q') ?? '').trim().slice(0, MAX_QUERY_LENGTH)
   if (!q) return c.json({ error: 'Missing query parameter q' }, 400)
 
-  const limit = toInt(c.req.query('limit'), 20)
-  const offset = toInt(c.req.query('offset'), 0)
+  const limit = pageLimit(c.req.query('limit'), 20)
+  const offset = pageOffset(c.req.query('offset'))
   const sort = parseSort(c.req.query('sort'))
   const filter = [
     ...parseSearchFilters({
@@ -933,11 +995,11 @@ app.get('/api/tags', async c => {
     return c.json({ code: 'preset_unavailable' }, 503)
   }
 
-  const t = (c.req.query('t') ?? '').trim().toLowerCase()
+  const t = (c.req.query('t') ?? '').trim().toLowerCase().slice(0, MAX_QUERY_LENGTH)
   if (!t) return c.json({ error: 'Missing query parameter t' }, 400)
 
-  const limit = toInt(c.req.query('limit'), 50)
-  const offset = toInt(c.req.query('offset'), 0)
+  const limit = pageLimit(c.req.query('limit'), 50)
+  const offset = pageOffset(c.req.query('offset'))
   const sort = parseSort(c.req.query('sort'))
   const filter = [
     `tags = ${quoteFilterValue(t)}`,
@@ -1001,11 +1063,11 @@ app.get('/api/people', async c => {
     return c.json({ code: 'preset_unavailable' }, 503)
   }
 
-  const q = (c.req.query('q') ?? '').trim()
+  const q = (c.req.query('q') ?? '').trim().slice(0, MAX_QUERY_LENGTH)
   if (!q) return c.json({ error: 'Missing query parameter q' }, 400)
 
-  const limit = toInt(c.req.query('limit'), 10)
-  const offset = toInt(c.req.query('offset'), 0)
+  const limit = pageLimit(c.req.query('limit'), 10)
+  const offset = pageOffset(c.req.query('offset'))
 
   // Build a Meili filter that excludes blocked and NSFW (on hide) pubkeys from the people index
   const blockedOrNsfwPubkeys: string[] = []
@@ -1020,7 +1082,9 @@ app.get('/api/people', async c => {
 
   const peopleFilter: string[] = []
   if (blockedOrNsfwPubkeys.length > 0) {
-    const clauses = blockedOrNsfwPubkeys.map(pk => `pubkey != "${pk}"`)
+    // Values are hex-validated upstream, but route every filter literal through
+    // the same escaper so a future relaxation cannot become filter injection.
+    const clauses = blockedOrNsfwPubkeys.map(pk => `pubkey != ${quoteFilterValue(pk)}`)
     peopleFilter.push(`(${clauses.join(' AND ')})`)
   }
 
@@ -1076,7 +1140,7 @@ app.get('/api/search/suggest', async c => {
     return c.json({ code: 'preset_unavailable' }, 503)
   }
 
-  const q = (c.req.query('q') ?? '').trim()
+  const q = (c.req.query('q') ?? '').trim().slice(0, MAX_QUERY_LENGTH)
   if (!q) return c.json({ suggestions: [] })
 
   const presetFilters = buildPresetFilters(policy, nsfwFilterRaw)
@@ -1092,8 +1156,8 @@ app.get('/api/search/suggest', async c => {
 })
 
 app.get('/api/search/completion', async c => {
-  const prefix = (c.req.query('prefix') ?? '').trim().toLowerCase()
-  if (!prefix || prefix.length < 1) return c.json({ completions: [] })
+  const prefix = (c.req.query('prefix') ?? '').trim().toLowerCase().slice(0, MAX_QUERY_LENGTH)
+  if (!prefix) return c.json({ completions: [] })
 
   try {
     const res = await fetch(`${meiliUrl}/indexes/terms/search`, {
@@ -1118,7 +1182,13 @@ app.get('/api/search/completion', async c => {
   }
 })
 
-app.post('/api/recommendations/related', async c => {
+const relatedRateLimit = rateLimit(ruleFromEnv('RATE_LIMIT_RECOMMENDATIONS_MAX', 20))
+const relatedBodyLimit = bodyLimit({
+  maxSize: MAX_RECOMMENDATION_BODY_BYTES,
+  onError: c => c.json({ error: 'Request body too large' }, 413),
+})
+
+app.post('/api/recommendations/related', relatedRateLimit, relatedBodyLimit, async c => {
   let body: {
     videoRef?: unknown
     user?: unknown
@@ -1153,6 +1223,9 @@ app.post('/api/recommendations/related', async c => {
 
   if (typeof body.videoRef !== 'string' || !body.videoRef.trim()) {
     return c.json({ error: 'Missing videoRef' }, 400)
+  }
+  if (body.videoRef.length > MAX_VIDEO_REF_LENGTH) {
+    return c.json({ error: 'videoRef too long' }, 400)
   }
 
   const rawLimit = typeof body.limit === 'number' || typeof body.limit === 'string'

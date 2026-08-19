@@ -247,4 +247,36 @@ describe('AsyncTtlCache', () => {
     assert.equal(third, 7);
     assert.equal(calls, 1);
   });
+
+  it('evicts oldest entries instead of growing without bound', () => {
+    const cache = new AsyncTtlCache<string, number>(10);
+
+    for (let i = 0; i < 500; i++) cache.set(`key-${i}`, i, 60_000);
+
+    assert.equal(cache.size, 10);
+    assert.equal(cache.get('key-0'), undefined);
+    assert.equal(cache.get('key-499'), 499);
+  });
+
+  it('reclaims expired entries before evicting live ones', () => {
+    const cache = new AsyncTtlCache<string, number>(4);
+
+    // ttl 0 expires the entry at its own insertion timestamp, so the sweep is
+    // driven by the clock the cache already reads rather than a real delay.
+    for (let i = 0; i < 4; i++) cache.set(`stale-${i}`, i, 0);
+    cache.set('fresh', 99, 60_000);
+
+    assert.equal(cache.size, 1);
+    assert.equal(cache.get('fresh'), 99);
+  });
+
+  it('bounds growth driven by one-shot keys that are never read again', () => {
+    const cache = new AsyncTtlCache<string, number>(64);
+
+    // Mirrors the attack shape: every request carries a distinct relay-hint
+    // derived key, so nothing is ever re-read and TTL alone frees nothing.
+    for (let i = 0; i < 10_000; i++) cache.set(`ref-${i}`, i, 5 * 60_000);
+
+    assert.ok(cache.size <= 64, `expected bounded cache, got ${cache.size}`);
+  });
 });

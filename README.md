@@ -184,6 +184,18 @@ Copy `.env.example` to `.env` and adjust as needed.
 |----------|---------|-------------|
 | `API_PORT` | `3001` | Host port the search API is published on. |
 | `CORS_ORIGIN` | _(empty)_ | Allowed CORS origin for `/api/*` routes (e.g. `https://nostub.be`). Leave empty to disable CORS headers. |
+| `TRUST_PROXY` | `false` | Set to `true` only when the API sits behind a reverse proxy you control. When `true` the rate limiter reads the first `X-Forwarded-For` hop; when `false` it uses the socket peer address. Enabling it without a proxy lets any client forge the header and mint unlimited rate-limit buckets. |
+| `RATE_LIMIT_ENABLED` | `true` | Master switch for per-client rate limiting. |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Rate-limit window length (ms). |
+| `RATE_LIMIT_MAX` | `300` | One shared budget per client per window across all of `/api/*`. Sized for a UI that fires completion requests while the user types. |
+| `RATE_LIMIT_RECOMMENDATIONS_MAX` | `20` | Requests per window per client for `POST /api/recommendations/related`, which fans out into up to three MeiliSearch queries plus relay traffic. |
+| `RATE_LIMIT_SITEMAP_MAX` | `10` | Requests per window per client for `/sitemap.xml`. |
+| `API_CACHE_MAX_AGE_S` | `60` | `max-age` emitted on successful `GET /api/*` responses. |
+| `API_CACHE_SWR_S` | `300` | `stale-while-revalidate` emitted on successful `GET /api/*` responses. |
+| `RELAY_HINT_MAX` | `4` | Maximum relay hints honoured from a client-supplied `nevent`/`naddr`. |
+| `RELAY_HINT_ALLOW_INSECURE` | `false` | Allow plaintext `ws://` relay hints. Keep `false` in production. |
+| `RELAY_HINT_ALLOW_PRIVATE` | `false` | Allow relay hints resolving to loopback/private/link-local addresses. Development only — `true` re-opens the SSRF surface. |
+| `RELAY_HINT_DNS_TIMEOUT_MS` | `2000` | Per-hostname DNS timeout when re-checking relay hints against private address space. |
 
 ### MeiliSearch service
 
@@ -258,9 +270,21 @@ In GitHub repository secrets, add:
 
 Coolify pulls the prebuilt API image from GHCR because the `api` service uses `image: ghcr.io/flox1an/nostube-search:latest`. The MeiliSearch services remain pinned to their own upstream images and are not rebuilt by this repository workflow.
 
-### Exposing MeiliSearch (optional)
+### Network exposure
 
-This compose file publishes MeiliSearch on `${MEILI_PORT:-7700}`. Keep a strong `MEILI_MASTER_KEY` in production, and remove the `ports:` block under `meilisearch` if you want it reachable only from the Docker network. Set `MEILI_ENV=development` only when you need the MeiliSearch dashboard for debugging.
+`docker-compose.yml` binds MeiliSearch (`${MEILI_PORT:-7700}`) and the MeiliSearch admin UI (`24900`) to `127.0.0.1`. Both are effectively unauthenticated administrative surfaces — `MEILI_MASTER_KEY` grants index deletion, document writes, and API-key minting, and the bundled dashboard ships no auth at all. Reach them through an SSH tunnel; never publish them on a public interface. Only the API (`${API_PORT:-3001}`) is meant to face the internet.
+
+Set `MEILI_ENV=development` only when you need the MeiliSearch dashboard for debugging, and keep a strong random `MEILI_MASTER_KEY`.
+
+### API hardening
+
+The API is unauthenticated by design, so abuse control is layered:
+
+- **Rate limiting** — a fixed-window per-client limiter guards `/api/*` with one shared budget, plus stricter dedicated budgets for `POST /api/recommendations/related` and `/sitemap.xml`. Denied requests get `429` with `Retry-After`. Behind a proxy, set `TRUST_PROXY=true` or every client shares one bucket.
+- **Response caching** — successful `GET /api/*` responses carry `Cache-Control: public, max-age=…, stale-while-revalidate=…` so a CDN absorbs repeats instead of MeiliSearch.
+- **Request ceilings** — `limit` is capped at 100, `offset` at 1000, query strings at 256 characters, `videoRef` at 4096 characters, and the recommendations request body at 16 KiB.
+- **Relay-hint filtering** — `nevent`/`naddr` relay hints are dialed server-side, so they are restricted to public `wss://` hosts, re-checked against private address space after DNS resolution, and capped at `RELAY_HINT_MAX`.
+- **Bounded caches** — every in-process TTL cache has an entry ceiling; keys derived from client input are digested to a fixed width.
 
 ---
 

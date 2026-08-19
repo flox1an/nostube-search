@@ -10,8 +10,10 @@ services:
     volumes:
       - meilisearch_data:/meili_data
     restart: unless-stopped
+    # Loopback-only: MEILI_MASTER_KEY grants full admin (index drop, document
+    # write, key minting). Reach it through an SSH tunnel, never the public NIC.
     ports:
-      - "${MEILI_PORT:-7700}:7700"
+      - "127.0.0.1:${MEILI_PORT:-7700}:7700"
 
   # ── API + Indexer ─────────────────────────────────────────────────────────────
   # Runs the API server and the background indexer in a single process.
@@ -49,6 +51,15 @@ services:
       MEDIA_AVAILABILITY_LOCK_PATH: /data/cache/.media-availability-check.lock
       MEDIA_AVAILABILITY_LOCK_STALE_MS: ${MEDIA_AVAILABILITY_LOCK_STALE_MS:-1800000}
       CORS_ORIGIN: ${CORS_ORIGIN:-}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-300}
+      RATE_LIMIT_RECOMMENDATIONS_MAX: ${RATE_LIMIT_RECOMMENDATIONS_MAX:-20}
+      RATE_LIMIT_SITEMAP_MAX: ${RATE_LIMIT_SITEMAP_MAX:-10}
+      API_CACHE_MAX_AGE_S: ${API_CACHE_MAX_AGE_S:-60}
+      API_CACHE_SWR_S: ${API_CACHE_SWR_S:-300}
+      RELAY_HINT_MAX: ${RELAY_HINT_MAX:-4}
       NOSTR_PRESET_RELAYS: ${NOSTR_PRESET_RELAYS:-}
       PRESET_CACHE_FRESH_TTL_MS: ${PRESET_CACHE_FRESH_TTL_MS:-300000}
       PRESET_CACHE_MAX_TTL_MS: ${PRESET_CACHE_MAX_TTL_MS:-1800000}
@@ -63,8 +74,9 @@ services:
     image: riccoxie/meilisearch-ui:latest
     platform: linux/arm64
     container_name: nostube-meilisearch-ui
+    # Unauthenticated MeiliSearch admin dashboard — loopback only.
     ports:
-      - "24900:24900"
+      - "127.0.0.1:24900:24900"
     restart: unless-stopped
     depends_on:
       - meilisearch
