@@ -22,6 +22,7 @@ services:
   # available throughout.
   api:
     image: ghcr.io/flox1an/nostube-search:latest
+    pull_policy: always
     container_name: nostube-api
     ports:
       - "${API_PORT:-3001}:3001"
