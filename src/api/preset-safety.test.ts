@@ -3,6 +3,9 @@ import { describe, it, before, after, mock } from 'node:test';
 import { SimplePool, type Event } from 'nostr-tools';
 
 import {
+  DEFAULT_NSFW_FILTER,
+  defaultPresetFilters,
+  defaultSafetyPolicy,
   isValidNsfwFilter,
   isValidPresetPubkey,
   parsePresetEvent,
@@ -10,6 +13,7 @@ import {
   isAuthorBlockedOrNsfw,
   PresetStore,
   fetchPresetFromRelays,
+  resolveSafetyInput,
   type NsfwFilter,
   type PresetPolicy,
 } from './preset-safety.js';
@@ -76,6 +80,65 @@ describe('isValidNsfwFilter', () => {
 
   it('rejects empty string', () => {
     assert.equal(isValidNsfwFilter(''), false);
+  });
+});
+
+describe('resolveSafetyInput', () => {
+  it('uses an empty policy and hides content warnings by default', () => {
+    assert.deepEqual(resolveSafetyInput('', ''), {
+      ok: true,
+      presetPubkey: null,
+      nsfwFilter: DEFAULT_NSFW_FILTER,
+    });
+  });
+
+  it('accepts a valid preset and explicit NSFW filter', () => {
+    assert.deepEqual(resolveSafetyInput(AAA.toUpperCase(), 'show'), {
+      ok: true,
+      presetPubkey: AAA,
+      nsfwFilter: 'show',
+    });
+  });
+
+  it('rejects an invalid supplied preset', () => {
+    assert.deepEqual(resolveSafetyInput('npub1invalid', ''), {
+      ok: false,
+      status: 400,
+      body: { code: 'preset_required' },
+    });
+  });
+
+  it('rejects an invalid supplied NSFW filter', () => {
+    assert.deepEqual(resolveSafetyInput('', 'banana'), {
+      ok: false,
+      status: 400,
+      body: { error: 'Invalid nsfwFilter: expected hide|warning|show, got "banana"' },
+    });
+  });
+});
+
+describe('default safety policy', () => {
+  it('returns independent empty policy arrays', () => {
+    const first = defaultSafetyPolicy();
+    first.blockedPubkeys.push(AAA);
+    assert.deepEqual(defaultSafetyPolicy(), {
+      blockedPubkeys: [],
+      nsfwPubkeys: [],
+      blockedEvents: [],
+      revision: 0,
+      eventId: '',
+    });
+  });
+
+  it('filters all content warnings when hiding', () => {
+    assert.deepEqual(defaultPresetFilters('hide'), [
+      '(contentWarning IS NULL OR contentWarning IS EMPTY)',
+    ]);
+  });
+
+  it('does not filter warnings when explicitly showing or warning', () => {
+    assert.deepEqual(defaultPresetFilters('warning'), []);
+    assert.deepEqual(defaultPresetFilters('show'), []);
   });
 });
 

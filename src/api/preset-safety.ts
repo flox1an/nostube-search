@@ -28,6 +28,55 @@ export function isValidPresetPubkey(value: string): boolean {
   return HEX_64_RE.test(value);
 }
 
+export const DEFAULT_NSFW_FILTER: NsfwFilter = 'hide';
+
+export type SafetyInputResolution =
+  | { ok: true; presetPubkey: string | null; nsfwFilter: NsfwFilter }
+  | { ok: false; status: 400; body: { code: 'preset_required' } | { error: string } };
+
+/**
+ * Resolve optional public API safety parameters.
+ *
+ * Requests without a preset use the built-in default policy and hide
+ * content-warning-marked results. A supplied preset remains strict so callers
+ * cannot silently downgrade an intended per-user policy.
+ */
+export function resolveSafetyInput(
+  presetPubkeyRaw: string,
+  nsfwFilterRaw: string,
+): SafetyInputResolution {
+  const presetPubkey = presetPubkeyRaw.trim().toLowerCase();
+  const nsfwFilter = nsfwFilterRaw.trim();
+  const resolvedNsfwFilter = nsfwFilter || DEFAULT_NSFW_FILTER;
+
+  if (presetPubkey && !isValidPresetPubkey(presetPubkey)) {
+    return { ok: false, status: 400, body: { code: 'preset_required' } };
+  }
+  if (!isValidNsfwFilter(resolvedNsfwFilter)) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilter)}` },
+    };
+  }
+  return {
+    ok: true,
+    presetPubkey: presetPubkey || null,
+    nsfwFilter: resolvedNsfwFilter,
+  };
+}
+
+/** A fresh empty policy used when a caller does not provide a NIP-78 preset. */
+export function defaultSafetyPolicy(): PresetPolicy {
+  return {
+    blockedPubkeys: [],
+    nsfwPubkeys: [],
+    blockedEvents: [],
+    revision: 0,
+    eventId: '',
+  };
+}
+
 function normalizeHexArray(input: unknown): string[] | null {
   if (!Array.isArray(input)) return null;
   const seen = new Set<string>();
@@ -298,6 +347,16 @@ export function buildPresetFilters(policy: PresetPolicy, nsfwFilter: NsfwFilter)
   }
 
   return filters;
+}
+
+/**
+ * Exclude document-level content warnings whenever the resolved safety mode is
+ * `hide`. This applies to anonymous searches and searches using a preset.
+ */
+export function defaultPresetFilters(nsfwFilter: NsfwFilter): string[] {
+  return nsfwFilter === 'hide'
+    ? ['(contentWarning IS NULL OR contentWarning IS EMPTY)']
+    : [];
 }
 
 /**

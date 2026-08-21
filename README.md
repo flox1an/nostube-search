@@ -35,11 +35,11 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 ## Endpoints
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/search?q=<query>` | Full-text video search (requires presetPubkey and nsfwFilter) |
-| `GET` | `/api/search/suggest?q=<query>` | Title suggestions (requires presetPubkey and nsfwFilter) |
+| `GET` | `/api/search?q=<query>` | Full-text video search (preset optional, nsfwFilter defaults to `hide`) |
+| `GET` | `/api/search/suggest?q=<query>` | Title suggestions (preset optional, nsfwFilter defaults to `hide`) |
 | `GET` | `/api/search/completion?prefix=<prefix>` | Word-level prefix completion (unfiltered) |
-| `GET` | `/api/tags?t=<tag>` | Browse videos by tag (requires presetPubkey and nsfwFilter) |
-| `GET` | `/api/people?q=<query>` | Author search (requires presetPubkey and nsfwFilter) |
+| `GET` | `/api/tags?t=<tag>` | Browse videos by tag (preset optional, nsfwFilter defaults to `hide`) |
+| `GET` | `/api/people?q=<query>` | Author search (preset optional, nsfwFilter defaults to `hide`) |
 | `GET` | `/health` | API + MeiliSearch health check |
 | `GET` | `/sitemap.xml` | SEO sitemap with top Nostube video/short URLs plus important authors |
 | `GET` | `/` | Built-in search UI |
@@ -60,6 +60,8 @@ The **indexer starts automatically** alongside the API. On first boot it runs a 
 | `language` | — | Repeatable or comma-separated primary language filter, e.g. `de`, `en`, `pt-br` |
 | `captionLanguage` | — | Repeatable or comma-separated caption language filter, e.g. `en` |
 | `sort` | `relevance` | One of: `relevance`, `newest`, `oldest`, `duration`; raw Meili sorts such as `rankingScore:desc`, `created_at:desc`, `effectivePublishedAt:desc`, `duration:desc` are also accepted |
+| `presetPubkey` | — (optional) | 64-char hex pubkey whose NIP-78 safety preset is applied. Omitted → empty built-in policy; only the default content-warning exclusion applies. Invalid non-empty value → `400` `preset_required` |
+| `nsfwFilter` | `hide` | One of: `hide`, `warning`, `show`. Omitted → `hide`. Invalid non-empty value → `400` |
 
 `sort=popularity` is intentionally not supported until the index has reliable popularity metrics such as views, likes/zaps, or replay data.
 
@@ -128,18 +130,22 @@ Up to 5 distinct non-empty titles matching `q`.
 { "completions": ["bitcoin", "blockchain", "..."] }
 ```
 | `400` | `{"error":"Missing query parameter q"}` | `q` is absent or blank on `/api/search` |
-| `400` | `{"code":"preset_required"}` | `presetPubkey` is missing or not a 64-char hex on a protected endpoint |
-| `400` | `{"error":"Invalid nsfwFilter: ..."}` | `nsfwFilter` is not one of `hide|warning|show` |
-| `503` | `{"code":"preset_unavailable"}` | No valid safety preset could be loaded from relays or cache |
+| `400` | `{"code":"preset_required"}` | `presetPubkey` is supplied but not a 64-char hex (omitted or blank is allowed and uses the default empty policy) |
+| `400` | `{"error":"Invalid nsfwFilter: ..."}` | `nsfwFilter` is supplied but not one of `hide|warning|show` (omitted or blank defaults to `hide`) |
+| `503` | `{"code":"preset_unavailable"}` | A valid `presetPubkey` was supplied but no safety preset could be loaded from relays or cache |
 | `502` | `{"error":"Search engine unavailable"}` | MeiliSearch unreachable or returned an error |
 
 ---
 
 ## Safety Presets (NIP-78)
 
-Protected endpoints require `presetPubkey` (a 64-char hex pubkey) and `nsfwFilter`
-(one of `hide`, `warning`, `show`). The server fetches the author's NIP-78 kind-30078
-event with d-tag `nostube-presets` to obtain a safety policy.
+Preset parameters are optional on all safety-aware endpoints: `presetPubkey` (a 64-char
+hex pubkey) and `nsfwFilter` (one of `hide`, `warning`, `show`; defaults to `hide`
+when omitted). With `hide`, the server excludes every document carrying a
+`contentWarning`, including platform-detected NSFW. When `presetPubkey` is omitted,
+the server uses an empty built-in policy. When supplied, it fetches the author's NIP-78
+kind-30078 event with d-tag `nostube-presets` to apply the policy's author and event
+blocks as well.
 
 **Policy fields (JSON arrays in the event content):**
 
@@ -153,23 +159,32 @@ event with d-tag `nostube-presets` to obtain a safety policy.
 
 | Value | Behaviour |
 |-------|-----------|
-| `hide` | NSFW authors are excluded from results entirely |
+| `hide` (default) | NSFW authors are excluded from results entirely, and all documents carrying a `contentWarning` (including platform-detected NSFW) are excluded too |
 | `warning` | NSFW author hits are included with `contentWarning: "NSFW"` |
 | `show` | NSFW authors appear without any annotation |
 
-The preset is cached with stale-while-revalidate (fresh 5 min, stale up to 30 min).
-Blocked pubkeys and events are always silently filtered regardless of `nsfwFilter`.
+`nsfwFilter` defaults to `hide`, so the content-warning exclusion applies by default
+even when no preset is supplied. The preset is cached with stale-while-revalidate
+(fresh 5 min, stale up to 30 min). Blocked pubkeys and events are always silently
+filtered regardless of `nsfwFilter`.
 
-### Protected endpoints
+### Safety-aware endpoints
 
-These endpoints reject requests without valid `presetPubkey`:
+These endpoints accept optional preset parameters (`presetPubkey` and `nsfwFilter`).
+When omitted, they use the default empty policy plus the content-warning exclusion:
 - `GET /api/search`
 - `GET /api/tags`
 - `GET /api/people`
 - `GET /api/search/suggest`
 - `POST /api/recommendations/related` (preset parameters are in the JSON body)
 
-`GET /api/search/completion` is unfiltered and does not require preset parameters.
+`GET /api/search/completion` is unfiltered and ignores preset parameters.
+
+**People-index limitation:** `/api/people` searches the `people` index, which stores
+author profiles only and has no `contentWarning` attribute, so the default
+content-warning exclusion cannot be applied there. On the default path (no preset),
+people results are returned unfiltered; only a supplied preset's `blockedPubkeys` and
+`nsfwPubkeys` (on `hide`) are excluded from people results.
 Copy `.env.example` to `.env` and adjust as needed.
 
 ### Required

@@ -21,10 +21,10 @@ import {
 } from './recommendations.js'
 import {
   buildPresetFilters,
-  isValidNsfwFilter,
-  isValidPresetPubkey,
-  isAuthorBlockedOrNsfw,
+  defaultPresetFilters,
+  defaultSafetyPolicy,
   presetStore,
+  resolveSafetyInput,
   type NsfwFilter,
   type PresetPolicy,
 } from './preset-safety.js'
@@ -925,21 +925,20 @@ async function relatedVideos(input: {
 
 
 
+async function policyForSafetyInput(presetPubkey: string | null): Promise<PresetPolicy | null> {
+  return presetPubkey ? presetStore.getPreset(presetPubkey) : defaultSafetyPolicy()
+}
+
 app.get('/api/search', async c => {
-  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
-  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+  const safety = resolveSafetyInput(
+    c.req.query('presetPubkey') ?? '',
+    c.req.query('nsfwFilter') ?? '',
+  )
+  if (!safety.ok) return c.json(safety.body, safety.status)
 
-  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
-    return c.json({ code: 'preset_required' }, 400)
-  }
-  if (!isValidNsfwFilter(nsfwFilterRaw)) {
-    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
-  }
-
-  const policy = await presetStore.getPreset(presetPubkey)
-  if (!policy) {
-    return c.json({ code: 'preset_unavailable' }, 503)
-  }
+  const policy = await policyForSafetyInput(safety.presetPubkey)
+  if (!policy) return c.json({ code: 'preset_unavailable' }, 503)
+  const { nsfwFilter } = safety
 
   const q = (c.req.query('q') ?? '').trim().slice(0, MAX_QUERY_LENGTH)
   if (!q) return c.json({ error: 'Missing query parameter q' }, 400)
@@ -947,6 +946,11 @@ app.get('/api/search', async c => {
   const limit = pageLimit(c.req.query('limit'), 20)
   const offset = pageOffset(c.req.query('offset'))
   const sort = parseSort(c.req.query('sort'))
+  const presetFilters = [
+    ...defaultPresetFilters(nsfwFilter),
+    ...(safety.presetPubkey === null ? [] : buildPresetFilters(policy, nsfwFilter)),
+  ]
+
   const filter = [
     ...parseSearchFilters({
       type: c.req.query('type'),
@@ -958,7 +962,7 @@ app.get('/api/search', async c => {
       language: c.req.queries('language') ?? c.req.query('language'),
       captionLanguage: c.req.queries('captionLanguage') ?? c.req.query('captionLanguage'),
     }),
-    ...buildPresetFilters(policy, nsfwFilterRaw),
+    ...presetFilters,
   ]
 
   try {
@@ -969,7 +973,7 @@ app.get('/api/search', async c => {
       ...(sort ? { sort: [sort] } : {}),
       ...(filter.length > 0 ? { filter } : {}),
     })
-    const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilterRaw)
+    const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilter)
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
 
     return c.json({ hits, total, limit, offset })
@@ -980,20 +984,15 @@ app.get('/api/search', async c => {
 })
 
 app.get('/api/tags', async c => {
-  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
-  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+  const safety = resolveSafetyInput(
+    c.req.query('presetPubkey') ?? '',
+    c.req.query('nsfwFilter') ?? '',
+  )
+  if (!safety.ok) return c.json(safety.body, safety.status)
 
-  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
-    return c.json({ code: 'preset_required' }, 400)
-  }
-  if (!isValidNsfwFilter(nsfwFilterRaw)) {
-    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
-  }
-
-  const policy = await presetStore.getPreset(presetPubkey)
-  if (!policy) {
-    return c.json({ code: 'preset_unavailable' }, 503)
-  }
+  const policy = await policyForSafetyInput(safety.presetPubkey)
+  if (!policy) return c.json({ code: 'preset_unavailable' }, 503)
+  const { nsfwFilter } = safety
 
   const t = (c.req.query('t') ?? '').trim().toLowerCase().slice(0, MAX_QUERY_LENGTH)
   if (!t) return c.json({ error: 'Missing query parameter t' }, 400)
@@ -1001,6 +1000,11 @@ app.get('/api/tags', async c => {
   const limit = pageLimit(c.req.query('limit'), 50)
   const offset = pageOffset(c.req.query('offset'))
   const sort = parseSort(c.req.query('sort'))
+  const presetFilters = [
+    ...defaultPresetFilters(nsfwFilter),
+    ...(safety.presetPubkey === null ? [] : buildPresetFilters(policy, nsfwFilter)),
+  ]
+
   const filter = [
     `tags = ${quoteFilterValue(t)}`,
     ...parseSearchFilters({
@@ -1013,7 +1017,7 @@ app.get('/api/tags', async c => {
       language: c.req.queries('language') ?? c.req.query('language'),
       captionLanguage: c.req.queries('captionLanguage') ?? c.req.query('captionLanguage'),
     }),
-    ...buildPresetFilters(policy, nsfwFilterRaw),
+    ...presetFilters,
   ]
 
   try {
@@ -1024,7 +1028,7 @@ app.get('/api/tags', async c => {
       ...(sort ? { sort: [sort] } : {}),
       filter,
     })
-    const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilterRaw)
+    const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilter)
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
     return c.json({ hits, total, limit, offset })
   } catch (err) {
@@ -1048,20 +1052,15 @@ type PeopleHit = {
 }
 
 app.get('/api/people', async c => {
-  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
-  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+  const safety = resolveSafetyInput(
+    c.req.query('presetPubkey') ?? '',
+    c.req.query('nsfwFilter') ?? '',
+  )
+  if (!safety.ok) return c.json(safety.body, safety.status)
 
-  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
-    return c.json({ code: 'preset_required' }, 400)
-  }
-  if (!isValidNsfwFilter(nsfwFilterRaw)) {
-    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
-  }
-
-  const policy = await presetStore.getPreset(presetPubkey)
-  if (!policy) {
-    return c.json({ code: 'preset_unavailable' }, 503)
-  }
+  const policy = await policyForSafetyInput(safety.presetPubkey)
+  if (!policy) return c.json({ code: 'preset_unavailable' }, 503)
+  const { nsfwFilter } = safety
 
   const q = (c.req.query('q') ?? '').trim().slice(0, MAX_QUERY_LENGTH)
   if (!q) return c.json({ error: 'Missing query parameter q' }, 400)
@@ -1074,7 +1073,7 @@ app.get('/api/people', async c => {
   for (const pk of policy.blockedPubkeys) {
     blockedOrNsfwPubkeys.push(pk)
   }
-  if (nsfwFilterRaw === 'hide') {
+  if (nsfwFilter === 'hide') {
     for (const pk of policy.nsfwPubkeys) {
       blockedOrNsfwPubkeys.push(pk)
     }
@@ -1125,28 +1124,31 @@ app.get('/api/people', async c => {
 })
 
 app.get('/api/search/suggest', async c => {
-  const presetPubkey = (c.req.query('presetPubkey') ?? '').trim()
-  const nsfwFilterRaw = (c.req.query('nsfwFilter') ?? '').trim() as NsfwFilter
+  const safety = resolveSafetyInput(
+    c.req.query('presetPubkey') ?? '',
+    c.req.query('nsfwFilter') ?? '',
+  )
+  if (!safety.ok) return c.json(safety.body, safety.status)
 
-  if (!presetPubkey || !isValidPresetPubkey(presetPubkey)) {
-    return c.json({ code: 'preset_required' }, 400)
-  }
-  if (!isValidNsfwFilter(nsfwFilterRaw)) {
-    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
-  }
-
-  const policy = await presetStore.getPreset(presetPubkey)
-  if (!policy) {
-    return c.json({ code: 'preset_unavailable' }, 503)
-  }
+  const policy = await policyForSafetyInput(safety.presetPubkey)
+  if (!policy) return c.json({ code: 'preset_unavailable' }, 503)
+  const { nsfwFilter } = safety
 
   const q = (c.req.query('q') ?? '').trim().slice(0, MAX_QUERY_LENGTH)
   if (!q) return c.json({ suggestions: [] })
 
-  const presetFilters = buildPresetFilters(policy, nsfwFilterRaw)
+  const presetFilters = [
+    ...defaultPresetFilters(nsfwFilter),
+    ...(safety.presetPubkey === null ? [] : buildPresetFilters(policy, nsfwFilter)),
+  ]
 
   try {
-    const result = await meiliSearch({ q, limit: 10, offset: 0, filter: presetFilters.length > 0 ? presetFilters : undefined })
+    const result = await meiliSearch({
+      q,
+      limit: 10,
+      offset: 0,
+      filter: presetFilters.length > 0 ? presetFilters : undefined,
+    })
     const suggestions = [...new Set(excludeKnownUnavailableHits(result.hits ?? []).map(hit => (hit.title ?? '').trim()).filter(Boolean))]
       .slice(0, 5)
     return c.json({ suggestions })
@@ -1205,21 +1207,17 @@ app.post('/api/recommendations/related', relatedRateLimit, relatedBodyLimit, asy
     return c.json({ error: 'Invalid JSON body' }, 400)
   }
 
-  // Validate preset policy parameters from body
-  const presetPubkeyRaw = typeof body.presetPubkey === 'string' ? body.presetPubkey.trim() : ''
-  const nsfwFilterRaw = typeof body.nsfwFilter === 'string' ? body.nsfwFilter.trim() : ''
+  // Resolve the safety policy from body params — a preset is optional, and the
+  // built-in default is an empty policy with NSFW content hidden.
+  const safety = resolveSafetyInput(
+    typeof body.presetPubkey === 'string' ? body.presetPubkey : '',
+    typeof body.nsfwFilter === 'string' ? body.nsfwFilter : '',
+  )
+  if (!safety.ok) return c.json(safety.body, safety.status)
 
-  if (!presetPubkeyRaw || !isValidPresetPubkey(presetPubkeyRaw)) {
-    return c.json({ code: 'preset_required' }, 400)
-  }
-  if (!isValidNsfwFilter(nsfwFilterRaw)) {
-    return c.json({ error: `Invalid nsfwFilter: expected hide|warning|show, got ${JSON.stringify(nsfwFilterRaw)}` }, 400)
-  }
-
-  const policy = await presetStore.getPreset(presetPubkeyRaw)
-  if (!policy) {
-    return c.json({ code: 'preset_unavailable' }, 503)
-  }
+  const policy = await policyForSafetyInput(safety.presetPubkey)
+  if (!policy) return c.json({ code: 'preset_unavailable' }, 503)
+  const { nsfwFilter } = safety
 
   if (typeof body.videoRef !== 'string' || !body.videoRef.trim()) {
     return c.json({ error: 'Missing videoRef' }, 400)
@@ -1236,8 +1234,10 @@ app.post('/api/recommendations/related', relatedRateLimit, relatedBodyLimit, asy
     ? body.excludeContentWarnings
     : true
 
-  const presetFilters = buildPresetFilters(policy, nsfwFilterRaw)
-
+  const presetFilters = [
+    ...defaultPresetFilters(nsfwFilter),
+    ...(safety.presetPubkey === null ? [] : buildPresetFilters(policy, nsfwFilter)),
+  ]
   try {
     const hits = await relatedVideos({
       videoRef: body.videoRef,
@@ -1250,14 +1250,14 @@ app.post('/api/recommendations/related', relatedRateLimit, relatedBodyLimit, asy
       limit,
       excludeContentWarnings,
       presetFilters: presetFilters.length > 0 ? presetFilters : undefined,
-      presetPubkey: presetPubkeyRaw,
+      presetPubkey: safety.presetPubkey ?? undefined,
       presetRevision: policy.revision,
-      nsfwFilter: nsfwFilterRaw,
+      nsfwFilter,
     })
 
     // Annotate NSFW warning hits
-    const annotated = nsfwFilterRaw === 'warning'
-      ? annotateNsfwHits(hits ?? [], policy, nsfwFilterRaw)
+    const annotated = nsfwFilter === 'warning'
+      ? annotateNsfwHits(hits ?? [], policy, nsfwFilter)
       : hits
 
     if (!annotated) return c.json({ error: 'Video not found' }, 404)
