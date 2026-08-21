@@ -346,6 +346,7 @@ function mapHit(hit: SearchHit) {
     duration: hit.duration ?? null,
     thumbnail: hit.thumbnail ?? null,
     videoUrl: hit.videoUrl ?? null,
+    nostrUrl: generateNostubeUrl({ event_id, pubkey, kind, d_tag: hit.d_tag }),
     tags: Array.isArray(hit.tags) ? hit.tags : [],
     mimeType: hit.mimeType ?? null,
     mediaType: hit.mediaType ?? null,
