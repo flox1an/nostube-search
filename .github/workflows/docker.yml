@@ -56,9 +56,33 @@ jobs:
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
-    runs-on: [self-hosted, tailscale]
+    env:
+      COOLIFY_TAILNET_HOST: ${{ vars.COOLIFY_TAILNET_HOST }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - name: Join Tailnet as tag:ci
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Verify CI network boundary
+        run: |
+          curl --fail --show-error --connect-timeout 10 \
+            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/health"
+
+          blocked() {
+            if timeout 5 bash -c "</dev/tcp/$1/$2"; then
+              echo "Unexpectedly reached $1:$2" >&2
+              return 1
+            fi
+          }
+
+          blocked 100.85.228.8 22
+          blocked 100.108.139.111 8006
+
       - name: Deploy to Coolify
         run: |
-          curl --fail --request GET "${{ secrets.COOLIFY_WEBHOOK }}" \
-            --header "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}"
+          curl --fail --show-error --request POST \
+            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/deploy?uuid=ybefchtop8deskp8dtsmbexw" \
+            --header "Authorization: Bearer ${{ secrets.COOLIFY_DEPLOY_TOKEN }}"
