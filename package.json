@@ -1,6 +1,6 @@
 {
   "name": "nostube-search",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,13 +8,13 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
-    "@contextvm/sdk": "^0.13.13",
+    "@contextvm/sdk": "^0.13.14",
     "@hono/node-server": "^2.1.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "franc-min": "^6.2.0",
     "hono": "^4.13.5",
     "langs": "^2.0.0",
-    "meilisearch": "^0.60.0",
+    "meilisearch": "^0.62.0",
     "nostr-tools": "^2.25.1",
     "postgres": "^3.4.9"
   },
