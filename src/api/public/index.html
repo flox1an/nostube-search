@@ -132,6 +132,25 @@
         resultsEl.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>'
       }
 
+      // One source of truth for the placeholder markup, used by both the
+      // "no thumbnail at all" and the "thumbnail failed to load" path.
+      const NO_THUMB_HTML =
+        '<div class="thumb" style="display:flex;align-items:center;justify-content:center;background:#2f2f2f;color:#666;font-size:12px">No thumbnail</div>'
+
+      // Must stay a function call from the inline handler: an onerror attribute
+      // cannot contain escaped double quotes — the HTML parser closes the
+      // attribute at the first one and leaks the remaining markup as text.
+      function thumbFailed(img) {
+        img.onerror = null
+        const fb = img.dataset.fallback
+        if (fb && img.src !== fb) {
+          img.onerror = () => thumbFailed(img)
+          img.src = fb
+          return
+        }
+        img.parentElement.innerHTML = NO_THUMB_HTML
+      }
+
       function renderItems(items, append = false) {
         const html = items.map(item => {
           const tags = (item.tags || []).slice(0, 6).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')
@@ -156,9 +175,9 @@
                       alt="thumbnail"
                       loading="lazy"
                       data-fallback="${escapeHtml(fallbackThumb)}"
-                      onerror="this.onerror=null;const fb=this.dataset.fallback;if(fb&&this.src!==fb){this.src=fb}else{this.alt='Thumbnail unavailable';this.style.display='none';this.parentElement.innerHTML='<div class=\"thumb\" style=\"display:flex;align-items:center;justify-content:center;background:#2f2f2f;color:#666;font-size:12px\">No thumbnail</div>'}"
+                      onerror="thumbFailed(this)"
                     />`
-                  : '<div class="thumb" style="display:flex;align-items:center;justify-content:center;background:#2f2f2f;color:#666;font-size:12px">No thumbnail</div>'
+                  : NO_THUMB_HTML
                 }
               </div>
               <div>

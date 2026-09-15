@@ -57,7 +57,12 @@ const DEFAULT_MAX_FETCH_MS = 60_000;
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 2;
 const DEFAULT_DISCONNECT_TIMEOUT_MS = 2_000;
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
-const TRUST_SCORE_CHUNK_SIZE = 50;
+// Relatr answers over NIP-44, whose plaintext is capped at 65535 bytes. A single
+// TrustScoreResult carries a full validator breakdown (~2 KB), so chunks of 50
+// produced responses relatr could not send at all ("invalid plaintext size:
+// must be between 1 and 65535") and every request timed out client-side.
+// Observed: 20 pubkeys per response succeed, 32 fail. 16 keeps margin.
+const DEFAULT_TRUST_SCORE_CHUNK_SIZE = 16;
 
 // Singleton state
 let activeClient: Client | null = null;
@@ -356,13 +361,14 @@ export async function fetchTrustScores(pubkeys: string[]): Promise<Map<string, n
   const chunkTimeoutMs = getPositiveIntEnv('TRUST_SCORE_CHUNK_TIMEOUT_MS', DEFAULT_CHUNK_TIMEOUT_MS);
   const maxFetchMs = getPositiveIntEnv('TRUST_SCORE_MAX_FETCH_MS', DEFAULT_MAX_FETCH_MS);
   const maxConsecutiveFailures = getPositiveIntEnv('TRUST_SCORE_MAX_CONSECUTIVE_FAILURES', DEFAULT_MAX_CONSECUTIVE_FAILURES);
+  const chunkSize = getPositiveIntEnv('TRUST_SCORE_CHUNK_SIZE', DEFAULT_TRUST_SCORE_CHUNK_SIZE);
   const deadline = startTotal + maxFetchMs;
   const chunks: string[][] = [];
-  for (let i = 0; i < missing.length; i += TRUST_SCORE_CHUNK_SIZE) {
-    chunks.push(missing.slice(i, i + TRUST_SCORE_CHUNK_SIZE));
+  for (let i = 0; i < missing.length; i += chunkSize) {
+    chunks.push(missing.slice(i, i + chunkSize));
   }
 
-  console.log(`[TrustScore] Fetching ${missing.length} missing pubkeys in ${chunks.length} chunks (chunk size=${TRUST_SCORE_CHUNK_SIZE}, chunk timeout=${chunkTimeoutMs}ms, max fetch=${maxFetchMs}ms)`);
+  console.log(`[TrustScore] Fetching ${missing.length} missing pubkeys in ${chunks.length} chunks (chunk size=${chunkSize}, chunk timeout=${chunkTimeoutMs}ms, max fetch=${maxFetchMs}ms)`);
 
   const freshScores = new Map<string, number>();
   let successCount = 0;
