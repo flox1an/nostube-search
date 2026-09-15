@@ -1083,7 +1083,12 @@ async function main(): Promise<void> {
   const sourceRelays = sourceRelaysFromEnv();
   console.log(`[Indexer] Source relays: ${sourceRelays.join(', ')}`);
 
-  const client = new Meilisearch({ host: meiliUrl, apiKey: meiliMasterKey });
+  // waitForTask defaults to 5000ms, which aborts a full re-index (~90k events)
+  // near the end when index writes slow down — the run throws away all progress
+  // and the scheduler retries from zero, so the live index never swaps.
+  const meiliTaskTimeoutMs = Number(process.env.MEILI_TASK_TIMEOUT_MS);
+  const timeout = Number.isFinite(meiliTaskTimeoutMs) && meiliTaskTimeoutMs > 0 ? meiliTaskTimeoutMs : 120_000;
+  const client = new Meilisearch({ host: meiliUrl, apiKey: meiliMasterKey, timeout, defaultWaitOptions: { timeout } });
   await ensureIndexExists(client, INDEX_UID, 'id', applyVideoIndexSettings);
   await ensureIndexExists(client, TERMS_INDEX_UID, 'id', applyTermsIndexSettings);
   await ensureMediaAvailabilityIndex(client);
