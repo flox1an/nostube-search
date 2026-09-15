@@ -343,7 +343,7 @@ function mapHit(hit: SearchHit) {
     kind,
     created_at: hit.created_at ?? 0,
     published_at: hit.published_at ?? null,
-    duration: hit.duration ?? null,
+    rankingScore: typeof hit.rankingScore === 'number' ? hit.rankingScore : undefined,
     thumbnail: hit.thumbnail ?? null,
     videoUrl: hit.videoUrl ?? null,
     nostrUrl: generateNostubeUrl({ event_id, pubkey, kind, d_tag: hit.d_tag }),
