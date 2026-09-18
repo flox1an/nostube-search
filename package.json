@@ -8,7 +8,7 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
-    "@contextvm/sdk": "^0.13.16",
+    "@contextvm/sdk": "^0.13.17",
     "@hono/node-server": "^2.1.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "franc-min": "^6.2.0",
@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@types/langs": "^2.0.5",
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
