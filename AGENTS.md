@@ -178,6 +178,10 @@ subagent({
 
 Issues are tracked in GitHub Issues for `flox1an/nostube-search`. See `docs/agents/issue-tracker.md`.
 
+### Triage labels
+
+The five canonical triage roles, each label string equal to its role name. See `docs/agents/triage-labels.md`.
+
 ### Domain docs
 
 This is a single-context repository. See `docs/agents/domain.md`.
