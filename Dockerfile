@@ -1,5 +1,5 @@
 # ---- Build stage ----
-FROM node:24-slim AS builder
+FROM node:24.22.1-slim AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,11 @@ RUN npx tsc --project tsconfig.json
 
 
 # ---- Runtime stage ----
-FROM node:24-slim AS runner
+FROM node:24.22.1-slim AS runner
+RUN apt-get update \
+    && apt-get install -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 
 WORKDIR /app
 
