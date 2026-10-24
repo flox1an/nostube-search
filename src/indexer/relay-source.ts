@@ -8,6 +8,21 @@ const RELATION_KINDS = [7, 1, 9734, 9735];
 const PLAYLIST_KIND = 30005;
 const PAGE_SIZE = 500;
 
+// SimplePool verifies every message inside its WebSocket handler, and undici
+// delivers a whole 500-event page in one macrotask — ~500 Schnorr checks
+// (~1–3 s) would run without yielding, stalling the event loop and the HTTP
+// API. Every query path below verifies via filterVerifiedEvents in yielding
+// 100-event slices instead, so the pool's own check is skipped (it would also
+// verify every event twice: the cleaned copy defeats nostr-tools' verified
+// cache).
+function newSourcePool(): SimplePool {
+  // verifyEvent is applied at runtime (SimplePool spreads caller options over
+  // its schnorr default) but is missing from SimplePool's constructor type, so
+  // the literal goes through a variable.
+  const options = { enablePing: false, enableReconnect: false, verifyEvent: () => true };
+  return new SimplePool(options);
+}
+
 export type EventRelationCounts = {
   relatedEventsTotal: number;
   reactionsCount: number;
@@ -30,7 +45,7 @@ export async function fetchVideoEventsSince(relays: string[], since: number): Pr
   const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
 
   for (const relay of relays) {
-    const pool = new SimplePool({ enablePing: false, enableReconnect: false });
+    const pool = newSourcePool();
     try {
       let until: number | undefined;
 
@@ -79,7 +94,7 @@ export async function* iterateAllVideoEvents(relays: string[]): AsyncGenerator<E
   const noDAddressable = new Map<string, Event>();
 
   for (const relay of relays) {
-    const pool = new SimplePool({ enablePing: false, enableReconnect: false });
+    const pool = newSourcePool();
     const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
 
     try {
@@ -178,7 +193,7 @@ function deduplicateAddressableEvents(events: Event[]): Event[] {
 }
 
 async function fetchPlaylistEventsFromRelay(relay: string, seen: Map<string, Event>): Promise<void> {
-  const pool = new SimplePool({ enablePing: false, enableReconnect: false });
+  const pool = newSourcePool();
   const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
   const fetchLimit = Number(process.env.PLAYLIST_FETCH_LIMIT) || 5_000;
 
@@ -228,7 +243,7 @@ export async function fetchRelationCountsForBatch(
 ): Promise<Map<string, EventRelationCounts>> {
   if (videoEvents.length === 0) return new Map();
 
-  const pool = new SimplePool({ enablePing: false, enableReconnect: false });
+  const pool = newSourcePool();
   const maxWait = Number(process.env.NOSTR_SOURCE_MAX_WAIT_MS) || 30_000;
 
   const eventIdSet = new Set(videoEvents.map(e => e.id));
