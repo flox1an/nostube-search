@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { Meilisearch, type Index } from 'meilisearch';
 import { nip19, type Event } from 'nostr-tools';
 
@@ -29,7 +30,7 @@ import { blossomListCache } from './blossom-lists.js';
 import { detectLanguageLocally } from './language-detector.js';
 import {
   sourceRelaysFromEnv,
-  fetchAllVideoEvents,
+  iterateAllVideoEvents,
   fetchAllPlaylistEvents,
   fetchVideoEventsSince,
   fetchRelationCountsForBatch,
@@ -42,7 +43,7 @@ import {
   ensurePeopleIndex,
   upsertPeopleDocuments,
 } from './people-index.js';
-import { readState, writeState, setStatePath } from './state.js';
+import { readState, writeState, setStatePath, needsFullReindex } from './state.js';
 import { firstLanguageTag, normalizeLanguage } from '../language.js';
 import { getExplicitContentWarning, hasNsfwPlatformAttributes } from '../nsfw-platform-detection.js';
 
@@ -681,8 +682,7 @@ async function indexBatch(
   batchEvents: Event[],
   sourceRelays: string[],
   trustClientConnected: boolean,
-  batchOffset: number,
-  total: number,
+  processed: number,
 ): Promise<{ taskUid: number; wordCounts: Map<string, number>; profileByPubkey: Map<string, AuthorProfile>; trustScoreByPubkey: Map<string, number>; pubkeys: string[] }> {
   const rows = batchEvents.map(eventToVideoRow);
   const uniquePubkeys = Array.from(new Set(rows.map(r => r.pubkey)));
@@ -691,7 +691,7 @@ async function indexBatch(
   try {
     relationCountsByEventId = await fetchRelationCountsForBatch(sourceRelays, batchEvents);
   } catch (err) {
-    console.warn(`[Indexer] Relation fetch failed at offset ${batchOffset}:`, err);
+    console.warn(`[Indexer] Relation fetch failed after ${processed} events:`, err);
   }
 
   let trustScoreByPubkey: Map<string, number>;
@@ -699,7 +699,7 @@ async function indexBatch(
     try {
       trustScoreByPubkey = await fetchTrustScores(uniquePubkeys);
     } catch (err) {
-      console.warn(`[Indexer] Trust score fetch failed at offset ${batchOffset}:`, err);
+      console.warn(`[Indexer] Trust score fetch failed after ${processed} events:`, err);
       trustScoreByPubkey = new Map();
     }
   } else {
@@ -718,12 +718,22 @@ async function indexBatch(
     .filter((key): key is string => Boolean(key));
   const availabilityByKey = await fetchAvailabilityByKeys(availabilityIndex, availabilityKeys);
 
-  const documents = await Promise.all(rows.map(row =>
-    toSearchDocument(row, profileByPubkey, relationCountsByEventId, urlStatsByEventId, trustScoreByPubkey, availabilityByKey),
-  ));
+  // Converting documents is CPU-bound (language detection, JSON parsing). Doing
+  // all 500 at once blocks the event loop — and with it the HTTP API — for
+  // seconds per batch. ponytail: fixed sub-chunk of 10; tune if conversion
+  // gets cheaper or heavier.
+  const documents: SearchDocument[] = [];
+  const DOC_SUBCHUNK = 10;
+  for (let i = 0; i < rows.length; i += DOC_SUBCHUNK) {
+    const slice = rows.slice(i, i + DOC_SUBCHUNK);
+    documents.push(...await Promise.all(slice.map(row =>
+      toSearchDocument(row, profileByPubkey, relationCountsByEventId, urlStatsByEventId, trustScoreByPubkey, availabilityByKey),
+    )));
+    await yieldToEventLoop();
+  }
 
   const task = await videosIndex.addDocuments(documents);
-  console.log(`[Indexer] ${batchOffset + rows.length}/${total} events enqueued (taskUid=${task.taskUid})`);
+  console.log(`[Indexer] ${processed} events enqueued (taskUid=${task.taskUid})`);
 
   return { taskUid: task.taskUid, wordCounts: collectWords(documents), profileByPubkey, trustScoreByPubkey, pubkeys: uniquePubkeys };
 }
@@ -867,11 +877,13 @@ async function incrementalUpdate(
   const pubkeyVideoCount = new Map<string, number>();
   const allProfilesByPubkey = new Map<string, AuthorProfile>();
   const allTrustByPubkey = new Map<string, number>();
+  let processed = 0;
 
   for (let offset = 0; offset < newEvents.length; offset += BATCH_SIZE) {
     const batchEvents = newEvents.slice(offset, offset + BATCH_SIZE);
+    processed += batchEvents.length;
     const { wordCounts, profileByPubkey, trustScoreByPubkey, pubkeys } = await indexBatch(
-      videosIndex, availabilityIndex, batchEvents, sourceRelays, trustClientConnected, offset, newEvents.length,
+      videosIndex, availabilityIndex, batchEvents, sourceRelays, trustClientConnected, processed,
     );
     mergeWordCounts(allWordCounts, wordCounts);
     for (const pk of pubkeys) pubkeyVideoCount.set(pk, (pubkeyVideoCount.get(pk) ?? 0) + 1);
@@ -920,28 +932,53 @@ async function fullReindex(
   const allTrustByPubkey = new Map<string, number>();
   let lastVideosTaskUid: number | undefined;
 
-  const allEvents = await fetchAllVideoEvents(sourceRelays);
-  const total = allEvents.length;
-  console.log(`[Indexer] Full re-index: ${total} events`);
-
-  for (let offset = 0; offset < total; offset += BATCH_SIZE) {
-    const batchEvents = allEvents.slice(offset, offset + BATCH_SIZE);
+  // Stream events page-by-page: holding the whole corpus in memory (~150k raw
+  // events ≈ 2 GB heap) caused OOM crashes during the daily full re-index.
+  // Per-batch memory is bounded by BATCH_SIZE; the only run-long state is the
+  // word vocabulary and per-author counters, both far smaller.
+  let batchEvents: Event[] = [];
+  let processed = 0;
+  const runBatch = async (events: Event[]): Promise<void> => {
     const { taskUid, wordCounts, profileByPubkey, trustScoreByPubkey, pubkeys } = await indexBatch(
-      nextVideosIndex, availabilityIndex, batchEvents, sourceRelays, trustClientConnected, offset, total,
+      nextVideosIndex, availabilityIndex, events, sourceRelays, trustClientConnected, processed,
     );
     lastVideosTaskUid = taskUid;
     mergeWordCounts(allWordCounts, wordCounts);
     for (const pk of pubkeys) pubkeyVideoCount.set(pk, (pubkeyVideoCount.get(pk) ?? 0) + 1);
     for (const [pk, profile] of profileByPubkey) allProfilesByPubkey.set(pk, profile);
     for (const [pk, trust] of trustScoreByPubkey) allTrustByPubkey.set(pk, trust);
-  }
+  };
 
+  for await (const event of iterateAllVideoEvents(sourceRelays)) {
+    batchEvents.push(event);
+    processed++;
+    if (batchEvents.length < BATCH_SIZE) continue;
+    await runBatch(batchEvents);
+    batchEvents = [];
+  }
+  if (batchEvents.length > 0) await runBatch(batchEvents);
+
+  console.log(`[Indexer] Full re-index: ${processed} events`);
   console.log(`[Indexer] Upserting ${allWordCounts.size} terms into ${TERMS_NEXT_UID} ...`);
   const lastTermsTaskUid = await upsertTerms(client, TERMS_NEXT_UID, allWordCounts);
 
   // Wait for all enqueued tasks to finish before swapping
   if (lastVideosTaskUid !== undefined) await client.tasks.waitForTask(lastVideosTaskUid);
   if (lastTermsTaskUid !== undefined) await client.tasks.waitForTask(lastTermsTaskUid);
+
+  // Refuse to swap when the fresh index is far smaller than the live one: an
+  // interrupted relay scan (relay down, pagination cut short) would otherwise
+  // swap a truncated corpus in as complete and pin it for the next interval.
+  const [liveStats, nextStats] = await Promise.all([
+    client.index(INDEX_UID).getStats(),
+    client.index(INDEX_NEXT_UID).getStats(),
+  ]);
+  if (liveStats.numberOfDocuments > 1_000 && nextStats.numberOfDocuments < liveStats.numberOfDocuments * 0.9) {
+    throw new Error(
+      `[Indexer] Full re-index aborted: fresh index holds ${nextStats.numberOfDocuments} documents ` +
+      `but the live index has ${liveStats.numberOfDocuments} — refusing to swap a truncated index`,
+    );
+  }
 
   // Atomically swap: videos ↔ videos_next, terms ↔ terms_next
   console.log('[Indexer] Swapping indexes ...');
@@ -958,7 +995,7 @@ async function fullReindex(
 
   const now = Date.now();
   writeState({ lastFullAt: now, lastIncrementalAt: now });
-  console.log(`[Indexer] Full re-index complete — ${total} events live.`);
+  console.log(`[Indexer] Full re-index complete — ${processed} events live.`);
 
   // Rebuild people index from accumulated data
   await ensurePeopleIndex(client);
@@ -982,6 +1019,7 @@ async function runScheduler(
   trustClientConnected: boolean,
 ): Promise<void> {
   const fullIntervalMs = Number(process.env.INDEXER_FULL_INTERVAL_MS) || 86_400_000; // 24 h
+  const fullRetryMs = Number(process.env.INDEXER_FULL_RETRY_MS) || 15 * 60_000; // retry a failed/interrupted full after 15 min
   const incrIntervalMs = Number(process.env.INDEXER_INCREMENTAL_INTERVAL_MS) || 600_000; // 10 min
   const availabilityIntervalMs = Number(process.env.MEDIA_AVAILABILITY_CHECK_INTERVAL_MS) || 600_000; // 10 min
   const playlistScoreIntervalMs = Number(process.env.PLAYLIST_SCORE_INTERVAL_MS) || 6 * 3_600_000; // 6 h
@@ -1003,7 +1041,7 @@ async function runScheduler(
     const state = readState();
     const now = Date.now();
 
-    const needsFull = now - state.lastFullAt >= fullIntervalMs;
+    const needsFull = needsFullReindex(state, now, fullIntervalMs, fullRetryMs);
     // Only consider incremental if a full index already exists
     const needsIncremental = !needsFull && state.lastFullAt > 0 && now - state.lastIncrementalAt >= incrIntervalMs;
     const needsAvailabilityCheck = state.lastFullAt > 0 && now - state.lastAvailabilityCheckAt >= availabilityIntervalMs;
@@ -1012,6 +1050,9 @@ async function runScheduler(
 
     try {
       if (needsFull) {
+        // Persist the start before any work: a crash mid-run must not restart a
+        // full re-index immediately on the next boot (needsFullReindex gates it).
+        writeState({ lastFullStartAt: now });
         await fullReindex(client, sourceRelays, trustClientConnected);
       } else if (needsIncremental) {
         await incrementalUpdate(client, sourceRelays, trustClientConnected, state.lastIncrementalAt);

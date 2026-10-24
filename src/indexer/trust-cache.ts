@@ -4,9 +4,13 @@
  * Stores pubkey → trust score + timestamp as a JSON file on disk.
  * Avoids redundant ContextVM network calls when the same pubkeys
  * appear across indexer batches.
+ *
+ * The file is loaded once into a bounded in-memory map (oldest writes evicted
+ * first) and written back at most once per FLUSH_DELAY_MS instead of being
+ * re-parsed and re-serialized on every indexer batch.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 
 // ---- Types ----
@@ -22,17 +26,29 @@ type CacheData = Record<string, CacheEntry>;
 
 const DEFAULT_CACHE_PATH = resolve(process.cwd(), '.trust-cache.json');
 const DEFAULT_TTL_MS = 86_400_000; // 1 day
+const DEFAULT_MAX_ENTRIES = 100_000; // ~100 bytes each on disk
+const FLUSH_DELAY_MS = 30_000;
 
 // ---- Module state (reconfigurable before first use) ----
 
 let cachePath: string = process.env.TRUST_CACHE_PATH ?? DEFAULT_CACHE_PATH;
 let ttlMs: number = Number(process.env.TRUST_CACHE_TTL_MS) || DEFAULT_TTL_MS;
+const maxEntries: number = Number(process.env.TRUST_CACHE_MAX_ENTRIES) || DEFAULT_MAX_ENTRIES;
+
+let cache: Map<string, CacheEntry> | null = null;
+let flushTimer: NodeJS.Timeout | null = null;
+
+process.on('exit', () => {
+  if (flushTimer) flush();
+});
 
 /**
- * Override cache file path at runtime. Call before any cache operations.
+ * Override cache file path at runtime. Pending writes go to the old path first.
  */
 export function setCachePath(path: string): void {
+  flush();
   cachePath = resolve(path);
+  cache = null;
 }
 
 /**
@@ -44,25 +60,58 @@ export function setCacheTTL(ms: number): void {
 
 // ---- Internal helpers ----
 
-function readCache(): CacheData {
+function load(): Map<string, CacheEntry> {
+  if (cache) return cache;
+  cache = new Map();
   try {
     if (existsSync(cachePath)) {
-      const raw = readFileSync(cachePath, 'utf-8');
-      return JSON.parse(raw) as CacheData;
+      const raw = JSON.parse(readFileSync(cachePath, 'utf-8')) as CacheData;
+      for (const [pubkey, entry] of Object.entries(raw)) cache.set(pubkey, entry);
     }
   } catch (err) {
     console.warn('[TrustCache] Failed to read cache file, starting fresh:', err);
   }
-  return {};
+  evictOverflow(cache);
+  return cache;
 }
 
-function writeCache(data: CacheData): void {
+/** Map iteration is insertion order and writes re-insert, so the first keys are the stalest. */
+function evictOverflow(data: Map<string, CacheEntry>): void {
+  for (const key of data.keys()) {
+    if (data.size <= maxEntries) break;
+    data.delete(key);
+  }
+}
+
+function put(data: Map<string, CacheEntry>, pubkey: string, entry: CacheEntry): void {
+  data.delete(pubkey);
+  data.set(pubkey, entry);
+}
+
+function scheduleFlush(): void {
+  if (flushTimer) return;
+  flushTimer = setTimeout(flush, FLUSH_DELAY_MS);
+  flushTimer.unref();
+}
+
+/**
+ * Write pending changes to disk now (also runs automatically on a timer and at process exit).
+ */
+export function flush(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (!cache) return;
   try {
     const dir = dirname(cachePath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    writeFileSync(cachePath, JSON.stringify(data, null, 2), 'utf-8');
+    // Write-then-rename so a crash mid-write cannot truncate the existing cache.
+    const tmpPath = `${cachePath}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(Object.fromEntries(cache)), 'utf-8');
+    renameSync(tmpPath, cachePath);
   } catch (err) {
     console.warn('[TrustCache] Failed to write cache file:', err);
   }
@@ -75,30 +124,29 @@ function writeCache(data: CacheData): void {
  * Returns the count of removed entries.
  */
 export function prune(): number {
-  const data = readCache();
+  const data = load();
   const now = Date.now();
-  const before = Object.keys(data).length;
+  const before = data.size;
 
-  for (const key of Object.keys(data)) {
-    if (now - data[key].cachedAt > ttlMs) {
-      delete data[key];
+  for (const [key, entry] of data) {
+    if (now - entry.cachedAt > ttlMs) {
+      data.delete(key);
     }
   }
 
-  const after = Object.keys(data).length;
-  if (after < before) {
-    writeCache(data);
+  const removed = before - data.size;
+  if (removed > 0) {
+    flush();
   }
 
-  return before - after;
+  return removed;
 }
 
 /**
  * Get a cached score for a pubkey, or null if missing / expired.
  */
 export function get(pubkey: string): number | null {
-  const data = readCache();
-  const entry = data[pubkey];
+  const entry = load().get(pubkey);
   if (!entry) return null;
   if (Date.now() - entry.cachedAt > ttlMs) return null;
   return entry.score;
@@ -109,13 +157,13 @@ export function get(pubkey: string): number | null {
  * Returns a Map of cached pubkey → score (only fresh entries).
  */
 export function getMany(pubkeys: string[]): Map<string, number> {
-  const data = readCache();
+  const data = load();
   const now = Date.now();
   const results = new Map<string, number>();
   let expired = 0;
 
   for (const pubkey of pubkeys) {
-    const entry = data[pubkey];
+    const entry = data.get(pubkey);
     if (entry) {
       const age = now - entry.cachedAt;
       if (age <= ttlMs) {
@@ -134,17 +182,17 @@ export function getMany(pubkeys: string[]): Map<string, number> {
 }
 
 /**
- * Store a single pubkey score in the cache and persist.
+ * Store a single pubkey score in the cache.
  */
 export function set(pubkey: string, score: number): void {
-  const data = readCache();
-  data[pubkey] = { score, cachedAt: Date.now() };
-  writeCache(data);
+  const data = load();
+  put(data, pubkey, { score, cachedAt: Date.now() });
+  evictOverflow(data);
+  scheduleFlush();
 }
 
 /**
- * Store multiple pubkey scores at once and persist.
- * More efficient than calling set() in a loop (one write).
+ * Store multiple pubkey scores at once.
  */
 export function setMany(scores: Map<string, number>): void {
   if (!scores.size) {
@@ -155,34 +203,34 @@ export function setMany(scores: Map<string, number>): void {
   const logSample = Array.from(scores.entries()).slice(0, 3).map(([pk, sc]) => `${pk.slice(0, 10)}...=${sc.toFixed(4)}`).join(', ');
   const writeStart = Date.now();
 
-  const data = readCache();
+  const data = load();
   const now = Date.now();
-  const beforeCount = Object.keys(data).length;
+  const beforeCount = data.size;
 
   for (const [pubkey, score] of scores) {
-    data[pubkey] = { score, cachedAt: now };
+    put(data, pubkey, { score, cachedAt: now });
   }
-
-  writeCache(data);
+  evictOverflow(data);
+  scheduleFlush();
 
   const elapsed = Date.now() - writeStart;
-  console.log(`[TrustCache] setMany: stored ${scores.size} scores (cache grew from ${beforeCount} to ${Object.keys(data).length} entries) in ${elapsed}ms [${logSample}]`);
+  console.log(`[TrustCache] setMany: stored ${scores.size} scores (cache grew from ${beforeCount} to ${data.size} entries, max ${maxEntries}) in ${elapsed}ms [${logSample}]`);
 }
 
 /**
  * Clear the cache file entirely.
  */
 export function clear(): void {
-  writeCache({});
+  cache = new Map();
+  flush();
 }
 
 /**
  * Get cache stats for logging / monitoring.
  */
 export function stats(): { entries: number; ttlMs: number; path: string } {
-  const data = readCache();
   return {
-    entries: Object.keys(data).length,
+    entries: load().size,
     ttlMs,
     path: cachePath,
   };

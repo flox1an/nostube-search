@@ -1275,6 +1275,9 @@ app.post('/api/recommendations/related', relatedRateLimit, relatedBodyLimit, asy
   }
 })
 
+// Liveness only — no upstream calls, answers even while the indexer is busy.
+app.get('/healthz', c => c.json({ ok: true }))
+
 app.get('/health', async c => {
   try {
     const res = await fetch(`${meiliUrl}/health`, {

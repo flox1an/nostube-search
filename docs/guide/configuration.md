@@ -39,6 +39,7 @@ The indexer queries each source relay individually and pages through it; add rel
 | --- | --- | --- |
 | `INDEXER_INCREMENTAL_INTERVAL_MS` | `600000` (10 min) | How often the indexer fetches newly published video events and upserts them into the live index. |
 | `INDEXER_FULL_INTERVAL_MS` | `86400000` (24 h) | How often a full re-index with rolling swap runs. |
+| `INDEXER_FULL_RETRY_MS` | `900000` (15 min) | Minimum gap before a failed or interrupted full re-index (e.g. after a crash) is retried. The start of every full run is persisted in the scheduler state, so a container restart mid-run does not start a new full pass immediately. |
 | `FORCE_FULL_REINDEX` | `false` | Set `true` to run one rolling-swap full re-index at process startup, then set it back to `false` and restart. Startup already runs a full pass when no saved scheduler state exists. |
 | `MEILI_TASK_TIMEOUT_MS` | `120000` | Timeout for waiting on MeiliSearch write tasks. Too small a value can abort a long full re-index, which then retries from zero. |
 | `FETCH_TRUST_SCORES` | `true` in Compose, off when unset in source | Fetch author trust scores via ContextVM/relatr. When disabled or unavailable, every author gets default `0.5`. |
@@ -72,6 +73,8 @@ Cache files live in the `api_cache` Docker volume by default (paths below are th
 | `PROFILE_CACHE_TTL_MS` | `86400000` (24 h) | Author profile cache TTL. |
 | `TRUST_CACHE_PATH` | `/data/cache/.trust-cache.json` in Compose, `.trust-cache.json` locally | Trust score cache file. |
 | `TRUST_CACHE_TTL_MS` | `86400000` (24 h) | Trust score cache TTL. |
+| `TRUST_CACHE_MAX_ENTRIES` | `100000` | Maximum trust score cache entries held in memory and on disk; oldest entries are evicted first. |
+| `PROFILE_CACHE_MAX_ENTRIES` | `20000` | Maximum author profile cache entries held in memory and on disk; oldest entries are evicted first. |
 | `BLOSSOM_LIST_CACHE_DIR` | `/data/cache/blossom-lists` in Compose, `./blossom-lists` locally | Directory caching authors' Blossom server lists (kind 10063). |
 | `BLOSSOM_LIST_CACHE_TTL_MS` | `86400000` (24 h) | Blossom server-list cache TTL. |
 

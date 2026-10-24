@@ -14,6 +14,7 @@
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { NostrClientTransport, PrivateKeySigner, ApplesauceRelayPool } from '@contextvm/sdk';
 import { nip19 } from 'nostr-tools';
 import { getMany, setMany } from './trust-cache.js';
@@ -84,13 +85,14 @@ function getPositiveIntEnv(name: string, fallback: number): number {
 
 function isTimeoutLike(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  const msg = error.message ?? '';
+  // The MCP SDK reports its own timeouts as McpError -32001 "Request timed out".
+  const msg = (error.message ?? '').toLowerCase();
   return error.name === 'TrustScoreTimeoutError'
     || error.name === 'AbortError'
+    || ('code' in error && error.code === ErrorCode.RequestTimeout)
     || msg.includes('timeout')
-    || msg.includes('Timeout')
-    || msg.includes('ETIMEDOUT')
-    || msg.includes('listOnTimeout');
+    || msg.includes('timed out')
+    || msg.includes('etimedout');
 }
 
 function startTrustScoreCooldown(reason: string): void {
@@ -217,9 +219,9 @@ export async function disconnectTrustScoreClient(): Promise<void> {
   }
   if (activeRelayPool) {
     await closeWithTimeout('relay pool', () => activeRelayPool!.disconnect(), disconnectTimeoutMs);
-  activeRelayPool = null;
-  trustScoreCooldownUntil = 0;
-}
+    activeRelayPool = null;
+  }
+  // Cooldown deliberately survives disconnect: a reconnect must not hammer a relatr that just timed out.
 }
 
 /**
@@ -381,17 +383,17 @@ export async function fetchTrustScores(pubkeys: string[]): Promise<Map<string, n
     const chunkPubkeySample = chunk.slice(0, 3).map(pk => pk.slice(0, 12) + '...').join(', ')
       + (chunk.length > 3 ? ` +${chunk.length - 3} more` : '');
 
+    // Re-checked per chunk so a cooldown started by this call or a concurrent one stops further requests.
+    if (Date.now() < trustScoreCooldownUntil) {
+      skippedCount = chunks.length - ci;
+      console.warn(`[TrustScore] Relatr cooldown active — skipping ${skippedCount} remaining chunks; they will use default scores`);
+      break;
+    }
+
     if (Date.now() >= deadline) {
       skippedCount = chunks.length - ci;
       console.warn(`[TrustScore] Stopping trust score fetch after ${Date.now() - startTotal}ms budget; ${skippedCount} chunks will use default scores`);
       startTrustScoreCooldown('max fetch budget exceeded');
-      break;
-    }
-
-    if (consecutiveFailures >= maxConsecutiveFailures) {
-      skippedCount = chunks.length - ci;
-      console.warn(`[TrustScore] Stopping trust score fetch after ${consecutiveFailures} consecutive failed chunks; ${skippedCount} chunks will use default scores`);
-      startTrustScoreCooldown(`${consecutiveFailures} consecutive failed chunks`);
       break;
     }
 
@@ -472,6 +474,14 @@ export async function fetchTrustScores(pubkeys: string[]): Promise<Map<string, n
 
       // Log the chunk pubkeys that failed
       console.error(`[TrustScore]   Failed pubkeys (${chunk.length}): ${chunk.map(pk => pk.slice(0, 12) + '...').join(', ')}`);
+
+      // A single timeout means relatr is unresponsive: back off now instead of
+      // spending another chunk timeout (or the next batch's) to find out again.
+      if (isTimeoutLike(error)) {
+        startTrustScoreCooldown(`chunk ${ci + 1} timed out after ${chunkElapsed}ms`);
+      } else if (consecutiveFailures >= maxConsecutiveFailures) {
+        startTrustScoreCooldown(`${consecutiveFailures} consecutive failed chunks`);
+      }
     }
   }
 

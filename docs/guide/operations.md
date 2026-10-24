@@ -14,6 +14,8 @@ docker compose logs --tail 50 api
 
 `GET /health` returns `{"ok":true}` when MeiliSearch answers, and `502` otherwise. It does **not** verify that indexing has completed or that search returns useful results. For end-to-end checks, query the API:
 
+`GET /healthz` is a pure liveness check: it answers immediately without contacting any upstream service and is the right probe for container health, since it stays fast while a full re-index is running.
+
 ```bash
 curl --fail --get http://localhost:3001/api/search \
   --data-urlencode 'q=nostr' \
@@ -26,7 +28,7 @@ Indexing progress and scheduler activity are written to the `api` container logs
 
 | Check | Command | Healthy when |
 | --- | --- | --- |
-| API reachable | `curl http://localhost:3001/health` | `200` with `{"ok":true}` |
+| API reachable | `curl http://localhost:3001/healthz` | `200` with `{"ok":true}` (no upstream calls) |
 | Search returns hits | `GET /api/search?q=nostr&limit=1` | `200`, `total` reflects indexed content |
 | Indexer running | `docker compose ps api` and `docker compose logs api` | No repeated fatal errors; logs show successful passes. An idle scheduler does not emit a per-minute heartbeat. |
 | MeiliSearch reachable | `curl http://127.0.0.1:7700/health` | `200` (loopback only) |
