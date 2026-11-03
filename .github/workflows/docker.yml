@@ -86,7 +86,7 @@ jobs:
       - name: Deploy to Coolify
         run: |
           curl --fail --show-error --request POST \
-            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/deploy?uuid=ybefchtop8deskp8dtsmbexw" \
+            "http://${COOLIFY_TAILNET_HOST}:8000/api/v1/deploy?uuid=faiwp6mf4kjncinoa48kntoq" \
             --header "Authorization: Bearer ${{ secrets.COOLIFY_DEPLOY_TOKEN }}"
 
       - name: Notify Kuma (deploy heartbeat)
