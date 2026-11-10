@@ -21,7 +21,7 @@ Pagination walks each source relay backwards in time, requesting pages of 500 ev
 
 For every event, the indexer parses tags and `imeta` entries to build a search document:
 
-- **Title** from the `title` tag; `Untitled` as fallback.
+- **Title** from the `title` tag, else the first `imeta` `alt` or the event content with URLs stripped (as nostube's `deriveTitleFromContent`). Empty when nothing remains; no `Untitled` placeholder is indexed.
 - **Summary** from `summary` or `alt`, falling back to the event content.
 - **Media URL** from the first video-MIME `imeta` entry (`url` + `m`), or the `url` tag as fallback. Audio `imeta` entries are used when no video entry exists.
 - **Thumbnail** from `thumb`, then `image`, then `imeta` image URLs.

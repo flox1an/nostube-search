@@ -1,6 +1,6 @@
 {
   "name": "nostube-search",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,19 +8,19 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
-    "@contextvm/sdk": "^0.13.17",
-    "@hono/node-server": "^2.1.1",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@contextvm/sdk": "^0.14.3",
+    "@hono/node-server": "^2.1.6",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "franc-min": "^6.2.0",
-    "hono": "^4.13.8",
+    "hono": "^4.13.17",
     "langs": "^2.0.0",
-    "meilisearch": "^0.62.0",
-    "nostr-tools": "^2.25.2",
-    "postgres": "^3.4.9"
+    "meilisearch": "^0.63.0",
+    "nostr-tools": "^2.26.0",
+    "postgres": "^4.1.0"
   },
   "devDependencies": {
     "@types/langs": "^2.0.5",
-    "@types/node": "^26.6.1",
+    "@types/node": "^26.6.6",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }

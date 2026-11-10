@@ -46,6 +46,7 @@ import {
 import { readState, writeState, setStatePath, needsFullReindex } from './state.js';
 import { firstLanguageTag, normalizeLanguage } from '../language.js';
 import { getExplicitContentWarning, hasNsfwPlatformAttributes } from '../nsfw-platform-detection.js';
+import { deriveVideoTitle } from '../nostr-events.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -432,7 +433,7 @@ async function toSearchDocument(
 ): Promise<SearchDocument> {
   const tags = getTags(row.raw_event);
 
-  const title = firstTagValue(tags, 'title') ?? 'Untitled';
+  const title = deriveVideoTitle(tags, row.content);
   const summary = firstTagValue(tags, 'summary') ?? firstTagValue(tags, 'alt') ?? row.content ?? '';
   const contentPreview = summary.slice(0, 200);
 

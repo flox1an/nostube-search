@@ -28,7 +28,7 @@ import {
   type NsfwFilter,
   type PresetPolicy,
 } from './preset-safety.js'
-import { filterVerifiedEvents } from '../nostr-events.js'
+import { deriveVideoTitle, filterVerifiedEvents, isPlaceholderTitle } from '../nostr-events.js'
 import { blockedAuthorPubkeys, isBlockedAuthorPubkey } from './blocked-authors.js'
 import { firstLanguageTag, normalizeLanguage, normalizeLanguages } from '../language.js'
 import { registerSitemapRoutes } from './sitemap.js'
@@ -511,7 +511,7 @@ function eventToSearchHit(event: Event): SearchHit {
     effectivePublishedAt: publishedAt ?? event.created_at,
     identifier: firstTagValue(tags, 'd'),
     d_tag: firstTagValue(tags, 'd'),
-    title: firstTagValue(tags, 'title') ?? 'Untitled',
+    title: deriveVideoTitle(tags, event.content),
     summary,
     content_preview: summary.slice(0, 200),
     content: event.content,
@@ -593,7 +593,8 @@ function recommendationQuery(source: SearchHit): string {
   const tags = Array.isArray(source.tags) ? source.tags : []
   // Repeat title + tags so MeiliSearch gives them more signal weight; secondary
   // content is capped so content_preview noise doesn't dilute the primary terms.
-  const primary = [source.title, ...tags, source.title, ...tags].filter(Boolean).join(' ')
+  const title = isPlaceholderTitle(source.title) ? null : source.title
+  const primary = [title, ...tags, title, ...tags].filter(Boolean).join(' ')
   const secondary = [source.summary, source.content_preview]
     .filter(Boolean)
     .join(' ')
