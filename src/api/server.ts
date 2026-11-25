@@ -33,6 +33,7 @@ import { blockedAuthorPubkeys, isBlockedAuthorPubkey } from './blocked-authors.j
 import { firstLanguageTag, normalizeLanguage, normalizeLanguages } from '../language.js'
 import { registerSitemapRoutes } from './sitemap.js'
 import { bodyLimit } from 'hono/body-limit'
+import { compress } from 'hono/compress'
 import { createHash } from 'node:crypto'
 import { rateLimit, ruleFromEnv } from './rate-limit.js'
 import { resolveSafeRelayHints, sanitizeRelayHints } from './relay-hints.js'
@@ -106,6 +107,10 @@ if (!meiliUrl || !meiliMasterKey) {
 }
 
 const app = new Hono()
+
+// Search payloads are large JSON (tag arrays, caption tracks, origins); gzip
+// cuts transfer size several-fold for clients that accept it.
+app.use(compress())
 
 const corsOrigin = process.env.CORS_ORIGIN?.replace(/^['"]|['"]$/g, '') ?? ''
 if (corsOrigin) {
@@ -331,6 +336,14 @@ function generateNostubeUrl(hit: {
   return `${baseUrl}/${nevent}?author=${author}&video=${video}`
 }
 
+// Exactly the fields mapHit() reads; `content`, `raw_event` and the other
+// indexer-only fields stay out of the wire payload. Keep in sync with mapHit().
+const SEARCH_HIT_ATTRIBUTES = [
+  'event_id', 'title', 'content_preview', 'summary', 'pubkey', 'kind', 'created_at',
+  'published_at', 'rankingScore', 'thumbnail', 'videoUrl', 'd_tag', 'tags', 'mimeType',
+  'mediaType', 'dimensions', 'textTracks', 'contentWarning',
+]
+
 function mapHit(hit: SearchHit) {
   const event_id = hit.event_id ?? ''
   const pubkey = hit.pubkey ?? ''
@@ -364,6 +377,7 @@ async function meiliSearch(params: {
   offset?: number
   sort?: string[]
   filter?: string[]
+  attributesToRetrieve?: string[]
   showRankingScore?: boolean
 }) {
   const blockedAuthorFilters = blockedAuthorPubkeys()
@@ -974,6 +988,7 @@ app.get('/api/search', async c => {
       offset,
       ...(sort ? { sort: [sort] } : {}),
       ...(filter.length > 0 ? { filter } : {}),
+      attributesToRetrieve: SEARCH_HIT_ATTRIBUTES,
     })
     const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilter)
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
@@ -1029,6 +1044,7 @@ app.get('/api/tags', async c => {
       offset,
       ...(sort ? { sort: [sort] } : {}),
       filter,
+      attributesToRetrieve: SEARCH_HIT_ATTRIBUTES,
     })
     const hits = annotateNsfwHits((result.hits ?? []).map(mapHit), policy, nsfwFilter)
     const total = result.estimatedTotalHits ?? result.totalHits ?? hits.length
@@ -1101,6 +1117,7 @@ app.get('/api/people', async c => {
         limit,
         offset,
         sort: ['videoCount:desc'],
+        attributesToRetrieve: ['pubkey', 'npub', 'name', 'display_name', 'username', 'about', 'picture', 'nip05', 'lud16', 'videoCount', 'globalTrustScore'],
         ...(peopleFilter.length > 0 ? { filter: peopleFilter } : {}),
       }),
     })
@@ -1125,6 +1142,13 @@ app.get('/api/people', async c => {
   }
 })
 
+// Completion and suggestion prefixes repeat across users, so repeat hits are
+// served from memory instead of re-querying MeiliSearch.
+const suggestCache = new AsyncTtlCache<string, string[]>(1_000)
+const completionCache = new AsyncTtlCache<string, string[]>(2_000)
+const SUGGEST_CACHE_TTL_MS = 60_000
+const COMPLETION_CACHE_TTL_MS = 5 * 60_000
+
 app.get('/api/search/suggest', async c => {
   const safety = resolveSafetyInput(
     c.req.query('presetPubkey') ?? '',
@@ -1144,15 +1168,20 @@ app.get('/api/search/suggest', async c => {
     ...(safety.presetPubkey === null ? [] : buildPresetFilters(policy, nsfwFilter)),
   ]
 
+  const cacheKey = `${nsfwFilter}|${safety.presetPubkey ?? ''}|${q}`
+
   try {
-    const result = await meiliSearch({
-      q,
-      limit: 10,
-      offset: 0,
-      filter: presetFilters.length > 0 ? presetFilters : undefined,
-    })
-    const suggestions = [...new Set(excludeKnownUnavailableHits(result.hits ?? []).map(hit => (hit.title ?? '').trim()).filter(Boolean))]
-      .slice(0, 5)
+    const suggestions = await suggestCache.getOrCreate(cacheKey, async () => {
+      const result = await meiliSearch({
+        q,
+        limit: 10,
+        offset: 0,
+        filter: presetFilters.length > 0 ? presetFilters : undefined,
+        attributesToRetrieve: ['title', 'availabilityStatus'],
+      })
+      return [...new Set(excludeKnownUnavailableHits(result.hits ?? []).map(hit => (hit.title ?? '').trim()).filter(Boolean))]
+        .slice(0, 5)
+    }, SUGGEST_CACHE_TTL_MS)
     return c.json({ suggestions })
   } catch {
     return c.json({ error: 'Search engine unavailable' }, 502)
@@ -1164,22 +1193,24 @@ app.get('/api/search/completion', async c => {
   if (!prefix) return c.json({ completions: [] })
 
   try {
-    const res = await fetch(`${meiliUrl}/indexes/terms/search`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${meiliMasterKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        q: prefix,
-        limit: 10,
-        attributesToRetrieve: ['word'],
-      }),
-    })
+    const completions = await completionCache.getOrCreate(prefix, async () => {
+      const res = await fetch(`${meiliUrl}/indexes/terms/search`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${meiliMasterKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          q: prefix,
+          limit: 10,
+          attributesToRetrieve: ['word'],
+        }),
+      })
 
-    if (!res.ok) throw new Error(`MeiliSearch request failed with status ${res.status}`)
-    const data = await res.json() as { hits: Array<{ word: string }> }
-    const completions = data.hits.map(h => h.word)
+      if (!res.ok) throw new Error(`MeiliSearch request failed with status ${res.status}`)
+      const data = await res.json() as { hits: Array<{ word: string }> }
+      return data.hits.map(h => h.word)
+    }, COMPLETION_CACHE_TTL_MS)
     return c.json({ completions })
   } catch {
     return c.json({ error: 'Search engine unavailable' }, 502)

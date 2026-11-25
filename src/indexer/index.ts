@@ -165,7 +165,6 @@ type SearchDocument = {
   globalTrustScore: number;
   rankingScore: number;
   playlistScore: number;
-  raw_event: Event;
 };
 
 // ── Env helpers ───────────────────────────────────────────────────────────────
@@ -580,7 +579,6 @@ async function toSearchDocument(
     globalTrustScore,
     rankingScore,
     playlistScore: 0,
-    raw_event: row.raw_event,
   };
 }
 
