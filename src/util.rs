@@ -9,6 +9,15 @@ pub fn now_ms() -> u64 {
 pub fn now_secs() -> u64 {
     now_ms() / 1_000
 }
+/// Lock a std `Mutex`, continuing with the data after another thread panicked
+/// while holding it. Every guarded value here (caches, counters, request
+/// windows) stays internally consistent between statements, so one panic must
+/// not turn into a failure of every later request.
+pub fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 pub fn number(value: &str) -> Option<f64> {
     let value = value.trim();
     if value.is_empty() {
@@ -84,6 +93,27 @@ pub fn truncate(value: &str, n: usize) -> String {
     value[..end].to_owned()
 }
 
+/// Environment-dependent scenarios run alone in a child process: changing a
+/// process environment while unrelated tests/HTTP clients run is not safe.
+#[cfg(test)]
+pub(crate) fn isolated_test(name: &str, environment: &[(&str, &std::ffi::OsStr)]) -> bool {
+    if std::env::var("NOSTUBE_ISOLATED_TEST").ok().as_deref() == Some(name) {
+        return true;
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", name, "--nocapture"])
+        .env("NOSTUBE_ISOLATED_TEST", name);
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    assert!(
+        command.status().unwrap().success(),
+        "isolated scenario {name} failed"
+    );
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +151,19 @@ mod tests {
         assert_eq!(truncate("", 2), "");
     }
     #[test]
+    fn a_poisoned_lock_is_still_usable() {
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(41));
+        let crashed = shared.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = crashed.lock().unwrap();
+            panic!("simulated panic while holding the lock");
+        })
+        .join();
+        assert!(shared.is_poisoned());
+        *lock(&shared) += 1;
+        assert_eq!(*lock(&shared), 42);
+    }
+    #[test]
     fn json_scores_keep_javascript_double_precision() {
         // IEEE-754 bit patterns captured from Node's JSON.parse/DataView.
         for (text, bits) in [
@@ -132,25 +175,4 @@ mod tests {
             assert_eq!(value.as_f64().unwrap().to_bits(), bits);
         }
     }
-}
-
-/// Environment-dependent scenarios run alone in a child process: changing a
-/// process environment while unrelated tests/HTTP clients run is not safe.
-#[cfg(test)]
-pub(crate) fn isolated_test(name: &str, environment: &[(&str, &std::ffi::OsStr)]) -> bool {
-    if std::env::var("NOSTUBE_ISOLATED_TEST").ok().as_deref() == Some(name) {
-        return true;
-    }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command
-        .args(["--exact", name, "--nocapture"])
-        .env("NOSTUBE_ISOLATED_TEST", name);
-    for (key, value) in environment {
-        command.env(key, value);
-    }
-    assert!(
-        command.status().unwrap().success(),
-        "isolated scenario {name} failed"
-    );
-    false
 }

@@ -1,3 +1,6 @@
+// Integration tests assert by panicking; `unwrap` is the intended failure mode here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use futures_util::{SinkExt, StreamExt};
 use nostr_sdk::prelude::*;
 use nostube_search::net::{Meili, fetch_events, fetch_raw_page};

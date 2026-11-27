@@ -149,7 +149,7 @@ pub fn resolve_safety_input(preset: &str, nsfw: &str) -> Result<SafetyInput, (u1
     if !["hide", "warning", "show"].contains(&nsfw) {
         return Err((
             400,
-            json!({"error":format!("Invalid nsfwFilter: expected hide|warning|show, got {}", serde_json::to_string(nsfw).unwrap())}),
+            json!({"error":format!("Invalid nsfwFilter: expected hide|warning|show, got {}", serde_json::to_string(nsfw).unwrap_or_default())}),
         ));
     }
     Ok(SafetyInput {

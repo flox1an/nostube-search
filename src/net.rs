@@ -13,6 +13,7 @@ pub struct Meili {
     pub key: String,
 }
 impl Meili {
+    #[allow(clippy::expect_used, reason = "startup only: no TLS means no service")]
     pub fn new(url: String, key: String) -> Self {
         Self {
             http: reqwest::Client::builder()
@@ -21,7 +22,7 @@ impl Meili {
                     120_000,
                 )))
                 .build()
-                .expect("TLS client initialization"),
+                .expect("HTTP client builds with the bundled TLS roots"),
             url: url.trim_end_matches('/').to_owned(),
             key,
         }

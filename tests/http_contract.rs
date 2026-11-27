@@ -1,3 +1,6 @@
+// Integration tests assert by panicking; `unwrap` is the intended failure mode here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use axum::{
     Router,
     body::Body,

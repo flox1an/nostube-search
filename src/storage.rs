@@ -195,7 +195,7 @@ pub fn needs_full_reindex(
 // Cache operations are serialized across callers; files retain the TS object format.
 static CACHE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
-    CACHE_LOCK.lock().unwrap()
+    crate::util::lock(&CACHE_LOCK)
 }
 fn read_map(path: &Path) -> HashMap<String, Value> {
     std::fs::read(path)
@@ -404,14 +404,14 @@ pub(crate) async fn blossom_servers(pubkeys: &[String]) -> HashMap<String, Vec<S
         let entry = npub(&k)
             .and_then(|n| std::fs::read(dir.join(format!("{n}.json"))).ok())
             .and_then(|v| serde_json::from_slice::<Value>(&v).ok());
-        if let Some(e) =
-            entry.filter(|e| e["pubkey"] == k && e["servers"].is_array() && fresh(e, ttl))
-        {
+        let cached = entry
+            .as_ref()
+            .filter(|e| e["pubkey"] == k && fresh(e, ttl))
+            .and_then(|e| e["servers"].as_array());
+        if let Some(servers) = cached {
             found.insert(
                 k,
-                e["servers"]
-                    .as_array()
-                    .unwrap()
+                servers
                     .iter()
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
@@ -455,12 +455,13 @@ pub(crate) async fn blossom_servers(pubkeys: &[String]) -> HashMap<String, Vec<S
             }
         }
         let entry = json!({"pubkey":k,"npub":n,"servers":servers,"cachedAt":now_ms(),"eventCreatedAt":event.and_then(|e| e.get("created_at"))});
-        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| {
-            std::fs::write(
-                dir.join(format!("{n}.json")),
-                serde_json::to_vec_pretty(&entry).unwrap(),
-            )
-        }) {
+        let written = serde_json::to_vec_pretty(&entry)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| {
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(dir.join(format!("{n}.json")), bytes)
+            });
+        if let Err(e) = written {
             eprintln!("[BlossomLists] cache write failed: {e}");
         }
         if event.is_some() {

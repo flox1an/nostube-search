@@ -1,261 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn media_keys_and_snapshots_match_existing_documents() {
-        let hash = "a".repeat(64);
-        assert_eq!(
-            media_availability_key(&json!({"videoUrl":format!("https://x/{hash}.mp4")})),
-            Some(format!("sha256:{hash}"))
-        );
-        assert_eq!(
-            media_availability_key(&json!({"videoUrl":"HTTPS://Media.Example.com/video.mp4#frag"}))
-                .as_deref(),
-            Some("url:https://media.example.com/video.mp4")
-        );
-        let snap = snapshot_from_availability(
-            Some("key"),
-            Some(
-                &json!({"status":"available","playableUrl":"https://x","checkedAt":10,"retryAfter":null}),
-            ),
-        );
-        assert_eq!(
-            snap,
-            json!({"mediaAvailabilityKey":"key","availabilityStatus":"available","hasPlayableMedia":true,"playableUrl":"https://x","mediaCheckedAt":10,"mediaRetryAfter":null})
-        );
-    }
-
-    #[test]
-    fn candidates_include_deduplicated_author_mirrors() {
-        let hash = "a".repeat(64);
-        let origin = format!("https://origin/{hash}.webm");
-        let hit = json!({"videoUrl":origin,"fallbackUrls":[origin],"mediaAvailabilityKey":format!("sha256:{hash}")});
-        assert_eq!(
-            candidate_urls(&hit, &["https://mirror/".into()]),
-            vec![origin, format!("https://mirror/{hash}.webm")]
-        );
-    }
-    #[test]
-    fn durable_documents_keep_history_and_valid_ids() {
-        let key = format!("sha256:{}", "a".repeat(64));
-        let previous = json!({"id":"legacy_valid_id","mediaKey":key,"status":"unavailable","attempts":7,"checkedAt":100,"retryAfter":200,"playableUrl":null,"checkedUrls":[],"sourceUrlCount":1});
-        let doc = availability_document(&key, Some(&previous), "error", None, vec![], 0, 300, 1000);
-        assert_eq!(doc["id"], "legacy_valid_id");
-        assert_eq!(doc["mediaKey"], key);
-        assert_eq!(doc["attempts"], 8);
-        assert_eq!(doc["retryAfter"], 1300);
-        let new_doc = availability_document(
-            &key,
-            None,
-            "available",
-            Some("https://x"),
-            vec![],
-            1,
-            300,
-            1000,
-        );
-        assert!(
-            new_doc["id"]
-                .as_str()
-                .unwrap()
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        );
-        assert_eq!(new_doc["retryAfter"], Value::Null);
-    }
-
-    #[tokio::test]
-    async fn head_checks_distinguish_http_failure_from_network_error_and_stop_at_success() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for response in [
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
-                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 42\r\n\r\n",
-            ] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buf = [0; 1024];
-                let _ = stream.read(&mut buf).await.unwrap();
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let urls = vec![
-            format!("http://{addr}/unavailable"),
-            format!("http://{addr}/available"),
-        ];
-        let (status, playable, checked) = check_urls(&reqwest::Client::new(), &urls, 2000).await;
-        assert_eq!(status, "available");
-        assert_eq!(playable.as_deref(), Some(urls[1].as_str()));
-        assert_eq!(checked[0]["status"], "unavailable");
-        assert_eq!(checked[0]["statusCode"], 503);
-        assert_eq!(checked[1]["contentType"], "video/mp4");
-        assert_eq!(checked[1]["contentLength"], 42);
-        server.await.unwrap();
-        let (status, _, checked) =
-            check_urls(&reqwest::Client::new(), &["not a url".into()], 200).await;
-        assert_eq!(status, "error");
-        assert_eq!(checked[0]["status"], "error");
-    }
-    #[tokio::test]
-    async fn load_finds_existing_document_by_media_key_not_legacy_id() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0; 4096];
-            loop {
-                let n = stream.read(&mut buf).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buf[..n]);
-                if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let headers = String::from_utf8_lossy(&request[..pos]);
-                    let len = headers
-                        .lines()
-                        .find_map(|l| {
-                            l.to_ascii_lowercase()
-                                .strip_prefix("content-length: ")
-                                .and_then(|s| s.parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= pos + 4 + len {
-                        break;
-                    }
-                }
-            }
-            let request = String::from_utf8(request).unwrap();
-            assert!(request.contains("mediaKey ="));
-            let body =
-                json!({"hits":[{"id":"legacy_valid_id","mediaKey":"sha256:abc","attempts":7}] })
-                    .to_string();
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-        });
-        let meili = Meili::new(format!("http://{addr}"), String::new());
-        let docs = load_availability(&meili, &["sha256:abc".into()])
-            .await
-            .unwrap();
-        assert_eq!(docs["sha256:abc"]["attempts"], 7);
-        server.await.unwrap();
-    }
-    #[test]
-    fn shared_media_receives_the_final_durable_snapshot() {
-        let key = "sha256:abc";
-        let doc = json!({"mediaKey":key,"status":"available","playableUrl":"https://mirror/video","checkedAt":100,"retryAfter":null});
-        let patches = shared_patches(key, &doc, &[json!({"id":"first"}), json!({"id":"second"})]);
-        assert_eq!(patches.len(), 2);
-        for (patch, id) in patches.iter().zip(["first", "second"]) {
-            assert_eq!(patch["id"], id);
-            assert_eq!(patch["mediaAvailabilityKey"], key);
-            assert_eq!(patch["hasPlayableMedia"], true);
-            assert_eq!(patch["playableUrl"], "https://mirror/video");
-        }
-    }
-    #[test]
-    fn mirrors_respect_hash_precedence_and_normalization() {
-        let hash = "a".repeat(64);
-        let key = format!("sha256:{hash}");
-        assert_eq!(
-            candidate_urls(
-                &json!({"hash":"invalid", "mediaAvailabilityKey":key}),
-                &["https://mirror".into()]
-            ),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            candidate_urls(
-                &json!({"mediaAvailabilityKey":format!("SHA256:{hash}")}),
-                &["https://mirror/".into()]
-            ),
-            vec![format!("https://mirror/{hash}.mp4")]
-        );
-        assert_eq!(
-            media_availability_key(
-                &json!({"fallbackUrls":["bad", " HTTPS://Example.com/video#x "]})
-            )
-            .as_deref(),
-            Some("url:https://example.com/video")
-        );
-    }
-    #[tokio::test]
-    async fn failed_http_responses_are_unavailable_while_transport_failures_are_errors() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for status in [404, 503] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buf = [0; 1024];
-                let _ = stream.read(&mut buf).await.unwrap();
-                stream.write_all(format!("HTTP/1.1 {status} Failure\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
-            }
-        });
-        let urls = vec![
-            "not a url".into(),
-            format!("http://{addr}/missing"),
-            format!("http://{addr}/failure"),
-        ];
-        let (status, playable, checked) = check_urls(&reqwest::Client::new(), &urls, 2000).await;
-        assert_eq!(status, "unavailable");
-        assert!(playable.is_none());
-        assert_eq!(
-            checked
-                .iter()
-                .map(|v| v["status"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["error", "unavailable", "unavailable"]
-        );
-        let doc = availability_document(
-            "url:https://example/",
-            None,
-            &status,
-            None,
-            checked,
-            3,
-            100,
-            50,
-        );
-        assert_eq!(doc["retryAfter"], 150);
-        assert_eq!(doc["sourceUrlCount"], 3);
-        server.await.unwrap();
-    }
-    #[test]
-    fn shared_snapshots_preserve_all_matching_ids() {
-        let hits: Vec<_> = (0..1200)
-            .map(|i| json!({"id":format!("video_{i}")}))
-            .collect();
-        let doc = json!({"status":"unavailable","playableUrl":null,"checkedAt":9,"retryAfter":19});
-        let patches = shared_patches("url:https://x/", &doc, &hits);
-        assert_eq!(patches.len(), 1200);
-        assert_eq!(patches[1199]["mediaRetryAfter"], 19);
-    }
-    #[test]
-    fn empty_key_is_unknown_even_if_document_exists() {
-        assert_eq!(
-            snapshot_from_availability(
-                Some(""),
-                Some(&json!({"status":"available","playableUrl":"https://x"}))
-            ),
-            json!({"mediaAvailabilityKey":null,"availabilityStatus":"unknown","hasPlayableMedia":false,"playableUrl":null,"mediaCheckedAt":null,"mediaRetryAfter":null})
-        );
-    }
-}
-
 use crate::{
     net::Meili,
     storage,
@@ -485,17 +227,27 @@ async fn check_urls(
         checked,
     )
 }
+/// What one availability probe found; the values that always travel together.
+struct ProbeOutcome<'a> {
+    status: &'a str,
+    playable: Option<&'a str>,
+    checked: Vec<Value>,
+    source_count: usize,
+}
 fn availability_document(
     key: &str,
     previous: Option<&Value>,
-    status: &str,
-    playable: Option<&str>,
-    checked: Vec<Value>,
-    source_count: usize,
+    outcome: ProbeOutcome<'_>,
     at: u64,
     retry_ms: u64,
 ) -> Value {
     use sha2::{Digest, Sha256};
+    let ProbeOutcome {
+        status,
+        playable,
+        checked,
+        source_count,
+    } = outcome;
     // Meili document IDs cannot contain the colon present in every TS media key.
     let id = previous
         .and_then(|v| v["id"].as_str())
@@ -566,10 +318,12 @@ pub async fn check_once(meili: &Meili) -> Result<()> {
         let doc = availability_document(
             &key,
             docs.get(&key).or_else(|| existing.get(&key)),
-            &status,
-            playable.as_deref(),
-            checked,
-            urls.len(),
+            ProbeOutcome {
+                status: &status,
+                playable: playable.as_deref(),
+                checked,
+                source_count: urls.len(),
+            },
             now_ms(),
             env_u64("MEDIA_AVAILABILITY_RETRY_AFTER_MS", 3_600_000),
         );
@@ -617,5 +371,278 @@ pub async fn run_checker(meili: &Meili) -> Result<()> {
             600_000,
         )))
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn media_keys_and_snapshots_match_existing_documents() {
+        let hash = "a".repeat(64);
+        assert_eq!(
+            media_availability_key(&json!({"videoUrl":format!("https://x/{hash}.mp4")})),
+            Some(format!("sha256:{hash}"))
+        );
+        assert_eq!(
+            media_availability_key(&json!({"videoUrl":"HTTPS://Media.Example.com/video.mp4#frag"}))
+                .as_deref(),
+            Some("url:https://media.example.com/video.mp4")
+        );
+        let snap = snapshot_from_availability(
+            Some("key"),
+            Some(
+                &json!({"status":"available","playableUrl":"https://x","checkedAt":10,"retryAfter":null}),
+            ),
+        );
+        assert_eq!(
+            snap,
+            json!({"mediaAvailabilityKey":"key","availabilityStatus":"available","hasPlayableMedia":true,"playableUrl":"https://x","mediaCheckedAt":10,"mediaRetryAfter":null})
+        );
+    }
+
+    #[test]
+    fn candidates_include_deduplicated_author_mirrors() {
+        let hash = "a".repeat(64);
+        let origin = format!("https://origin/{hash}.webm");
+        let hit = json!({"videoUrl":origin,"fallbackUrls":[origin],"mediaAvailabilityKey":format!("sha256:{hash}")});
+        assert_eq!(
+            candidate_urls(&hit, &["https://mirror/".into()]),
+            vec![origin, format!("https://mirror/{hash}.webm")]
+        );
+    }
+    #[test]
+    fn durable_documents_keep_history_and_valid_ids() {
+        let key = format!("sha256:{}", "a".repeat(64));
+        let previous = json!({"id":"legacy_valid_id","mediaKey":key,"status":"unavailable","attempts":7,"checkedAt":100,"retryAfter":200,"playableUrl":null,"checkedUrls":[],"sourceUrlCount":1});
+        let doc = availability_document(
+            &key,
+            Some(&previous),
+            ProbeOutcome {
+                status: "error",
+                playable: None,
+                checked: vec![],
+                source_count: 0,
+            },
+            300,
+            1000,
+        );
+        assert_eq!(doc["id"], "legacy_valid_id");
+        assert_eq!(doc["mediaKey"], key);
+        assert_eq!(doc["attempts"], 8);
+        assert_eq!(doc["retryAfter"], 1300);
+        let new_doc = availability_document(
+            &key,
+            None,
+            ProbeOutcome {
+                status: "available",
+                playable: Some("https://x"),
+                checked: vec![],
+                source_count: 1,
+            },
+            300,
+            1000,
+        );
+        assert!(
+            new_doc["id"]
+                .as_str()
+                .unwrap()
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
+        assert_eq!(new_doc["retryAfter"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn head_checks_distinguish_http_failure_from_network_error_and_stop_at_success() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for response in [
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 42\r\n\r\n",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 1024];
+                let _ = stream.read(&mut buf).await.unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let urls = vec![
+            format!("http://{addr}/unavailable"),
+            format!("http://{addr}/available"),
+        ];
+        let (status, playable, checked) = check_urls(&reqwest::Client::new(), &urls, 2000).await;
+        assert_eq!(status, "available");
+        assert_eq!(playable.as_deref(), Some(urls[1].as_str()));
+        assert_eq!(checked[0]["status"], "unavailable");
+        assert_eq!(checked[0]["statusCode"], 503);
+        assert_eq!(checked[1]["contentType"], "video/mp4");
+        assert_eq!(checked[1]["contentLength"], 42);
+        server.await.unwrap();
+        let (status, _, checked) =
+            check_urls(&reqwest::Client::new(), &["not a url".into()], 200).await;
+        assert_eq!(status, "error");
+        assert_eq!(checked[0]["status"], "error");
+    }
+    #[tokio::test]
+    async fn load_finds_existing_document_by_media_key_not_legacy_id() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..pos]);
+                    let len = headers
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|s| s.parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= pos + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.contains("mediaKey ="));
+            let body =
+                json!({"hits":[{"id":"legacy_valid_id","mediaKey":"sha256:abc","attempts":7}] })
+                    .to_string();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let meili = Meili::new(format!("http://{addr}"), String::new());
+        let docs = load_availability(&meili, &["sha256:abc".into()])
+            .await
+            .unwrap();
+        assert_eq!(docs["sha256:abc"]["attempts"], 7);
+        server.await.unwrap();
+    }
+    #[test]
+    fn shared_media_receives_the_final_durable_snapshot() {
+        let key = "sha256:abc";
+        let doc = json!({"mediaKey":key,"status":"available","playableUrl":"https://mirror/video","checkedAt":100,"retryAfter":null});
+        let patches = shared_patches(key, &doc, &[json!({"id":"first"}), json!({"id":"second"})]);
+        assert_eq!(patches.len(), 2);
+        for (patch, id) in patches.iter().zip(["first", "second"]) {
+            assert_eq!(patch["id"], id);
+            assert_eq!(patch["mediaAvailabilityKey"], key);
+            assert_eq!(patch["hasPlayableMedia"], true);
+            assert_eq!(patch["playableUrl"], "https://mirror/video");
+        }
+    }
+    #[test]
+    fn mirrors_respect_hash_precedence_and_normalization() {
+        let hash = "a".repeat(64);
+        let key = format!("sha256:{hash}");
+        assert_eq!(
+            candidate_urls(
+                &json!({"hash":"invalid", "mediaAvailabilityKey":key}),
+                &["https://mirror".into()]
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            candidate_urls(
+                &json!({"mediaAvailabilityKey":format!("SHA256:{hash}")}),
+                &["https://mirror/".into()]
+            ),
+            vec![format!("https://mirror/{hash}.mp4")]
+        );
+        assert_eq!(
+            media_availability_key(
+                &json!({"fallbackUrls":["bad", " HTTPS://Example.com/video#x "]})
+            )
+            .as_deref(),
+            Some("url:https://example.com/video")
+        );
+    }
+    #[tokio::test]
+    async fn failed_http_responses_are_unavailable_while_transport_failures_are_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for status in [404, 503] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 1024];
+                let _ = stream.read(&mut buf).await.unwrap();
+                stream.write_all(format!("HTTP/1.1 {status} Failure\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            }
+        });
+        let urls = vec![
+            "not a url".into(),
+            format!("http://{addr}/missing"),
+            format!("http://{addr}/failure"),
+        ];
+        let (status, playable, checked) = check_urls(&reqwest::Client::new(), &urls, 2000).await;
+        assert_eq!(status, "unavailable");
+        assert!(playable.is_none());
+        assert_eq!(
+            checked
+                .iter()
+                .map(|v| v["status"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["error", "unavailable", "unavailable"]
+        );
+        let doc = availability_document(
+            "url:https://example/",
+            None,
+            ProbeOutcome {
+                status: &status,
+                playable: None,
+                checked,
+                source_count: 3,
+            },
+            100,
+            50,
+        );
+        assert_eq!(doc["retryAfter"], 150);
+        assert_eq!(doc["sourceUrlCount"], 3);
+        server.await.unwrap();
+    }
+    #[test]
+    fn shared_snapshots_preserve_all_matching_ids() {
+        let hits: Vec<_> = (0..1200)
+            .map(|i| json!({"id":format!("video_{i}")}))
+            .collect();
+        let doc = json!({"status":"unavailable","playableUrl":null,"checkedAt":9,"retryAfter":19});
+        let patches = shared_patches("url:https://x/", &doc, &hits);
+        assert_eq!(patches.len(), 1200);
+        assert_eq!(patches[1199]["mediaRetryAfter"], 19);
+    }
+    #[test]
+    fn empty_key_is_unknown_even_if_document_exists() {
+        assert_eq!(
+            snapshot_from_availability(
+                Some(""),
+                Some(&json!({"status":"available","playableUrl":"https://x"}))
+            ),
+            json!({"mediaAvailabilityKey":null,"availabilityStatus":"unknown","hasPlayableMedia":false,"playableUrl":null,"mediaCheckedAt":null,"mediaRetryAfter":null})
+        );
     }
 }

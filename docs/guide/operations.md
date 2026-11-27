@@ -152,7 +152,7 @@ See [Configuration](./configuration#api-behavior) for the related variables.
 
 Use this repository as a Docker Compose application, set `MEILI_MASTER_KEY` and relay settings in Coolify, and deploy the three services. Preserve both named volumes across redeployments.
 
-The existing Docker workflow builds pull requests without publishing. Pushes to `main` publish the API image to GHCR, join the deployment Tailnet and call Coolify's API. Its configuration uses the repository variable `COOLIFY_TAILNET_HOST` and secrets `TS_AUTHKEY`, `COOLIFY_DEPLOY_TOKEN` and `KUMA_PUSH_TOKEN` (deploy monitoring). This workflow is specific to the maintainer's infrastructure; a self-hosted installation should configure its own deployment rather than reuse private host/resource identifiers.
+The Docker workflow checks formatting and Clippy before building. Pull requests build without publishing; pushes to `main` publish the API image to GHCR, join the deployment Tailnet and call Coolify's API. Its configuration uses the repository variable `COOLIFY_TAILNET_HOST` and secrets `TS_AUTHKEY`, `COOLIFY_DEPLOY_TOKEN` and `KUMA_PUSH_TOKEN` (deploy monitoring). This workflow is specific to the maintainer's infrastructure; a self-hosted installation should configure its own deployment rather than reuse private host/resource identifiers.
 
 ## Where to look in the source
 

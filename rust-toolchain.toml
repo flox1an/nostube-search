@@ -1,0 +1,6 @@
+# Same version as the Docker build stage (Dockerfile), so a local `cargo clippy`
+# and `cargo fmt` give the same answers as CI. Raise both together.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

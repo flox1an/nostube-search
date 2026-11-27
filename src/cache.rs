@@ -40,7 +40,7 @@ impl AsyncCache {
         }
     }
     pub async fn get(&self, key: &str) -> Option<Value> {
-        let mut state = self.inner.state.lock().expect("cache lock poisoned");
+        let mut state = crate::util::lock(&self.inner.state);
         if state
             .values
             .get(key)
@@ -64,7 +64,7 @@ impl AsyncCache {
             return Ok(value);
         }
         let flight = {
-            let mut state = self.inner.state.lock().expect("cache lock poisoned");
+            let mut state = crate::util::lock(&self.inner.state);
             if state.flights.len() >= self.inner.max {
                 state.flights.retain(|_, v| v.strong_count() > 0);
             }
@@ -82,7 +82,7 @@ impl AsyncCache {
             return Ok(value);
         }
         let value = factory().await?;
-        let mut state = self.inner.state.lock().expect("cache lock poisoned");
+        let mut state = crate::util::lock(&self.inner.state);
         if !state.values.contains_key(&key) && state.values.len() >= self.inner.max {
             state
                 .values

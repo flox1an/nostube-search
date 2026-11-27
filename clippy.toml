@@ -1,0 +1,4 @@
+# A failing assertion is the point of a test; only production code must not panic.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

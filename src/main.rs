@@ -29,12 +29,16 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
+#[allow(
+    clippy::expect_used,
+    reason = "startup only: without signals the container cannot stop cleanly"
+)]
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("SIGTERM handler");
+                .expect("installing the SIGTERM handler");
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
     }
     #[cfg(not(unix))]

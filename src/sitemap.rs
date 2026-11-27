@@ -1,160 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    fn video() -> Value {
-        json!({"event_id":"1".repeat(64),"pubkey":"0".repeat(64),"kind":21,"title":"Great & Video","thumbnail":"https://example.com/t?a=1&b=2","playableUrl":"https://example.com/v","hasPlayableMedia":true,"published_at":1700000000})
-    }
-    #[test]
-    fn video_rules_and_encoding() {
-        let mut v = video();
-        let e = video_entry(&v, "https://nostu.be").unwrap();
-        assert!(e.loc.starts_with("https://nostu.be/v/nevent1"));
-        let xml = xml(&[e]);
-        assert!(xml.contains("Great &amp; Video"));
-        assert!(xml.contains("a=1&amp;b=2"));
-        assert!(xml.contains("2023-11-14T22:13:20.000Z"));
-        v["contentWarning"] = json!("nsfw");
-        assert!(video_entry(&v, "https://nostu.be").is_none());
-        v["contentWarning"] = json!(" ");
-        v["kind"] = json!(34236);
-        v["identifier"] = json!("abc");
-        assert!(
-            video_entry(&v, "https://nostu.be")
-                .unwrap()
-                .loc
-                .contains("/short/naddr1")
-        );
-    }
-    #[test]
-    fn author_threshold_and_empty_xml() {
-        let a = json!({"pubkey":"0".repeat(64),"videoCount":10});
-        assert!(author_entry(&a, "https://nostu.be", 10).is_none());
-        let a = json!({"pubkey":"0".repeat(64),"videoCount":11});
-        assert!(
-            author_entry(&a, "https://nostu.be", 10)
-                .unwrap()
-                .loc
-                .contains("/p/nprofile1")
-        );
-        assert!(xml(&[]).ends_with("</urlset>\n"));
-    }
-    #[test]
-    fn source_behavior_tables() {
-        for (kind, path) in [
-            (21, "/v/nevent1"),
-            (22, "/short/nevent1"),
-            (34235, "/v/naddr1"),
-            (34236, "/short/naddr1"),
-        ] {
-            let mut hit = video();
-            hit["kind"] = json!(kind);
-            hit["identifier"] = json!("abc");
-            assert!(
-                video_entry(&hit, "https://example.com")
-                    .unwrap()
-                    .loc
-                    .contains(path)
-            );
-        }
-        for (key, value) in [
-            ("kind", json!(1)),
-            ("pubkey", json!("")),
-            ("event_id", json!("")),
-            ("contentWarning", json!("nsfw")),
-            ("hasPlayableMedia", json!(false)),
-            ("title", json!("Untitled")),
-            ("title", json!("   ")),
-            ("thumbnail", json!("  ")),
-            ("playableUrl", Value::Null),
-        ] {
-            let mut hit = video();
-            hit[key] = value;
-            assert!(
-                video_entry(&hit, "https://nostu.be").is_none(),
-                "{key}: {hit}"
-            );
-        }
-        let mut hit = video();
-        hit["playableUrl"] = Value::Null;
-        hit["videoUrl"] = json!(" https://example.com/fallback ");
-        hit["duration"] = json!(124.7);
-        hit["effectivePublishedAt"] = json!(1800000000);
-        hit["summary"] = json!("x".repeat(250));
-        let entry = video_entry(&hit, "https://nostu.be").unwrap();
-        assert!(entry.lastmod.unwrap().starts_with("2027"));
-        let v = entry.video.unwrap();
-        assert_eq!(v.content, "https://example.com/fallback");
-        assert_eq!(v.duration, Some(124));
-        assert_eq!(v.description.len(), 200);
-        for count in [0, 5, 10] {
-            assert!(
-                author_entry(
-                    &json!({"pubkey":"0".repeat(64),"videoCount":count}),
-                    "https://nostu.be",
-                    10
-                )
-                .is_none()
-            );
-        }
-        assert_eq!(
-            author_entry(
-                &json!({"npub":"nprofile1existing","videoCount":11}),
-                "https://example.com",
-                10
-            )
-            .unwrap()
-            .loc,
-            "https://example.com/p/nprofile1existing"
-        );
-    }
-    #[tokio::test]
-    async fn people_search_contract_has_no_sort() {
-        use axum::{
-            Json, Router,
-            extract::{Path, State},
-            routing::post,
-        };
-        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, Value)>::new()));
-        async fn search(
-            State(requests): State<std::sync::Arc<tokio::sync::Mutex<Vec<(String, Value)>>>>,
-            Path(index): Path<String>,
-            Json(body): Json<Value>,
-        ) -> Json<Value> {
-            requests.lock().await.push((index.clone(), body));
-            if index == "people" {
-                Json(json!({"hits":[{"pubkey":"0".repeat(64),"videoCount":15}]}))
-            } else {
-                Json(json!({"hits":[]}))
-            }
-        }
-        let app = Router::new()
-            .route("/indexes/{index}/search", post(search))
-            .with_state(requests.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let meili = crate::net::Meili::new(format!("http://{addr}"), "test-key".into());
-        let output = build_sitemap(&meili).await.unwrap();
-        server.abort();
-        assert!(output.contains("/p/nprofile1"));
-        let requests = requests.lock().await;
-        let people = requests
-            .iter()
-            .find(|(index, _)| index == "people")
-            .unwrap();
-        assert!(people.1.get("sort").is_none());
-        assert_eq!(people.1["filter"], json!(["videoCount > 10"]));
-        assert!(requests.iter().any(|(index, body)| index == "videos"
-            && body["sort"]
-                == json!([
-                    "rankingScore:desc",
-                    "playlistScore:desc",
-                    "effectivePublishedAt:desc"
-                ])));
-    }
-}
-
 use nostr::nips::nip19::{Nip19Profile, ToBech32};
 use nostr_sdk::prelude::PublicKey;
 use serde_json::{Value, json};
@@ -367,4 +210,162 @@ pub async fn build_sitemap(meili: &crate::net::Meili) -> anyhow::Result<String> 
         }
     }
     Ok(xml(&entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    fn video() -> Value {
+        json!({"event_id":"1".repeat(64),"pubkey":"0".repeat(64),"kind":21,"title":"Great & Video","thumbnail":"https://example.com/t?a=1&b=2","playableUrl":"https://example.com/v","hasPlayableMedia":true,"published_at":1700000000})
+    }
+    #[test]
+    fn video_rules_and_encoding() {
+        let mut v = video();
+        let e = video_entry(&v, "https://nostu.be").unwrap();
+        assert!(e.loc.starts_with("https://nostu.be/v/nevent1"));
+        let xml = xml(&[e]);
+        assert!(xml.contains("Great &amp; Video"));
+        assert!(xml.contains("a=1&amp;b=2"));
+        assert!(xml.contains("2023-11-14T22:13:20.000Z"));
+        v["contentWarning"] = json!("nsfw");
+        assert!(video_entry(&v, "https://nostu.be").is_none());
+        v["contentWarning"] = json!(" ");
+        v["kind"] = json!(34236);
+        v["identifier"] = json!("abc");
+        assert!(
+            video_entry(&v, "https://nostu.be")
+                .unwrap()
+                .loc
+                .contains("/short/naddr1")
+        );
+    }
+    #[test]
+    fn author_threshold_and_empty_xml() {
+        let a = json!({"pubkey":"0".repeat(64),"videoCount":10});
+        assert!(author_entry(&a, "https://nostu.be", 10).is_none());
+        let a = json!({"pubkey":"0".repeat(64),"videoCount":11});
+        assert!(
+            author_entry(&a, "https://nostu.be", 10)
+                .unwrap()
+                .loc
+                .contains("/p/nprofile1")
+        );
+        assert!(xml(&[]).ends_with("</urlset>\n"));
+    }
+    #[test]
+    fn source_behavior_tables() {
+        for (kind, path) in [
+            (21, "/v/nevent1"),
+            (22, "/short/nevent1"),
+            (34235, "/v/naddr1"),
+            (34236, "/short/naddr1"),
+        ] {
+            let mut hit = video();
+            hit["kind"] = json!(kind);
+            hit["identifier"] = json!("abc");
+            assert!(
+                video_entry(&hit, "https://example.com")
+                    .unwrap()
+                    .loc
+                    .contains(path)
+            );
+        }
+        for (key, value) in [
+            ("kind", json!(1)),
+            ("pubkey", json!("")),
+            ("event_id", json!("")),
+            ("contentWarning", json!("nsfw")),
+            ("hasPlayableMedia", json!(false)),
+            ("title", json!("Untitled")),
+            ("title", json!("   ")),
+            ("thumbnail", json!("  ")),
+            ("playableUrl", Value::Null),
+        ] {
+            let mut hit = video();
+            hit[key] = value;
+            assert!(
+                video_entry(&hit, "https://nostu.be").is_none(),
+                "{key}: {hit}"
+            );
+        }
+        let mut hit = video();
+        hit["playableUrl"] = Value::Null;
+        hit["videoUrl"] = json!(" https://example.com/fallback ");
+        hit["duration"] = json!(124.7);
+        hit["effectivePublishedAt"] = json!(1800000000);
+        hit["summary"] = json!("x".repeat(250));
+        let entry = video_entry(&hit, "https://nostu.be").unwrap();
+        assert!(entry.lastmod.unwrap().starts_with("2027"));
+        let v = entry.video.unwrap();
+        assert_eq!(v.content, "https://example.com/fallback");
+        assert_eq!(v.duration, Some(124));
+        assert_eq!(v.description.len(), 200);
+        for count in [0, 5, 10] {
+            assert!(
+                author_entry(
+                    &json!({"pubkey":"0".repeat(64),"videoCount":count}),
+                    "https://nostu.be",
+                    10
+                )
+                .is_none()
+            );
+        }
+        assert_eq!(
+            author_entry(
+                &json!({"npub":"nprofile1existing","videoCount":11}),
+                "https://example.com",
+                10
+            )
+            .unwrap()
+            .loc,
+            "https://example.com/p/nprofile1existing"
+        );
+    }
+    #[tokio::test]
+    async fn people_search_contract_has_no_sort() {
+        use axum::{
+            Json, Router,
+            extract::{Path, State},
+            routing::post,
+        };
+        type RequestLog = std::sync::Arc<tokio::sync::Mutex<Vec<(String, Value)>>>;
+        let requests: RequestLog = Default::default();
+        async fn search(
+            State(requests): State<RequestLog>,
+            Path(index): Path<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            requests.lock().await.push((index.clone(), body));
+            if index == "people" {
+                Json(json!({"hits":[{"pubkey":"0".repeat(64),"videoCount":15}]}))
+            } else {
+                Json(json!({"hits":[]}))
+            }
+        }
+        let app = Router::new()
+            .route("/indexes/{index}/search", post(search))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let meili = crate::net::Meili::new(format!("http://{addr}"), "test-key".into());
+        let output = build_sitemap(&meili).await.unwrap();
+        server.abort();
+        assert!(output.contains("/p/nprofile1"));
+        let requests = requests.lock().await;
+        let people = requests
+            .iter()
+            .find(|(index, _)| index == "people")
+            .unwrap();
+        assert!(people.1.get("sort").is_none());
+        assert_eq!(people.1["filter"], json!(["videoCount > 10"]));
+        assert!(requests.iter().any(|(index, body)| index == "videos"
+            && body["sort"]
+                == json!([
+                    "rankingScore:desc",
+                    "playlistScore:desc",
+                    "effectivePublishedAt:desc"
+                ])));
+    }
 }

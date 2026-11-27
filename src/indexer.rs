@@ -859,91 +859,94 @@ mod tests {
         ingest(&meili, &[relay1.clone(), relay2.clone()], true, 0)
             .await
             .unwrap();
-        let state_guard = state.lock().unwrap();
-        let docs = &state_guard.docs["videos"];
-        assert_eq!(docs.len(), 3);
-        assert_eq!(
-            docs[&format!(
-                "34235_{}_{}",
-                newer["pubkey"].as_str().unwrap(),
-                hex::encode("video")
-            )]["event_id"],
-            newer["id"]
-        );
-        assert!(docs.contains_key(missing_new["id"].as_str().unwrap()));
-        assert!(docs.contains_key(last["id"].as_str().unwrap()));
-        assert_eq!(docs[last["id"].as_str().unwrap()]["playlistScore"], 1.0);
-        assert!(
-            state_guard
+        {
+            let state_guard = state.lock().unwrap();
+            let docs = &state_guard.docs["videos"];
+            assert_eq!(docs.len(), 3);
+            assert_eq!(
+                docs[&format!(
+                    "34235_{}_{}",
+                    newer["pubkey"].as_str().unwrap(),
+                    hex::encode("video")
+                )]["event_id"],
+                newer["id"]
+            );
+            assert!(docs.contains_key(missing_new["id"].as_str().unwrap()));
+            assert!(docs.contains_key(last["id"].as_str().unwrap()));
+            assert_eq!(docs[last["id"].as_str().unwrap()]["playlistScore"], 1.0);
+            assert!(
+                state_guard
+                    .requests
+                    .iter()
+                    .any(|(method, path, body)| method == "PATCH"
+                        && path == "/indexes/videos_next/settings"
+                        && body == &video_settings())
+            );
+            assert!(
+                state_guard
+                    .requests
+                    .iter()
+                    .any(|(method, path, body)| method == "PATCH"
+                        && path == "/indexes/terms_next/settings"
+                        && body == &terms_settings())
+            );
+            let settings = state_guard
                 .requests
                 .iter()
-                .any(|(method, path, body)| method == "PATCH"
-                    && path == "/indexes/videos_next/settings"
-                    && body == &video_settings())
-        );
-        assert!(
-            state_guard
-                .requests
-                .iter()
-                .any(|(method, path, body)| method == "PATCH"
-                    && path == "/indexes/terms_next/settings"
-                    && body == &terms_settings())
-        );
-        let settings = state_guard
-            .requests
-            .iter()
-            .find(|(_, path, _)| path == "/indexes/videos_next/settings")
-            .unwrap()
-            .2
-            .clone();
-        assert!(
-            settings["filterableAttributes"]
-                .as_array()
+                .find(|(_, path, _)| path == "/indexes/videos_next/settings")
                 .unwrap()
-                .contains(&json!("mediaAvailabilityKey"))
-        );
-        assert!(
-            settings["sortableAttributes"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("playlistScore"))
-        );
-        let terms = state_guard
-            .requests
-            .iter()
-            .find(|(_, path, _)| path == "/indexes/terms_next/settings")
-            .unwrap()
-            .2
-            .clone();
-        assert_eq!(
-            terms["typoTolerance"]["minWordSizeForTypos"],
-            json!({"oneTypo":100,"twoTypos":100})
-        );
-        drop(state_guard);
-        let filters = requests1.lock().unwrap();
-        let cursors: Vec<_> = filters
-            .iter()
-            .filter(|v| {
-                v["kinds"]
+                .2
+                .clone();
+            assert!(
+                settings["filterableAttributes"]
                     .as_array()
-                    .is_some_and(|k| k.contains(&json!(21)))
-            })
-            .map(|v| v["until"].as_u64())
-            .collect();
-        assert_eq!(cursors, vec![None, Some(499), Some(499)]);
-        drop(filters);
+                    .unwrap()
+                    .contains(&json!("mediaAvailabilityKey"))
+            );
+            assert!(
+                settings["sortableAttributes"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("playlistScore"))
+            );
+            let terms = state_guard
+                .requests
+                .iter()
+                .find(|(_, path, _)| path == "/indexes/terms_next/settings")
+                .unwrap()
+                .2
+                .clone();
+            assert_eq!(
+                terms["typoTolerance"]["minWordSizeForTypos"],
+                json!({"oneTypo":100,"twoTypos":100})
+            );
+        }
+        {
+            let filters = requests1.lock().unwrap();
+            let cursors: Vec<_> = filters
+                .iter()
+                .filter(|v| {
+                    v["kinds"]
+                        .as_array()
+                        .is_some_and(|k| k.contains(&json!(21)))
+                })
+                .map(|v| v["until"].as_u64())
+                .collect();
+            assert_eq!(cursors, vec![None, Some(499), Some(499)]);
+        }
         ingest(&meili, &[relay1, relay2], false, 400).await.unwrap();
-        let state_guard = state.lock().unwrap();
-        assert_eq!(state_guard.docs["videos"].len(), 3);
-        assert_eq!(
-            state_guard.docs["videos"][&format!(
-                "34235_{}_{}",
-                newer["pubkey"].as_str().unwrap(),
-                hex::encode("video")
-            )]["event_id"],
-            newer["id"]
-        );
-        drop(state_guard);
+        {
+            let state_guard = state.lock().unwrap();
+            assert_eq!(state_guard.docs["videos"].len(), 3);
+            assert_eq!(
+                state_guard.docs["videos"][&format!(
+                    "34235_{}_{}",
+                    newer["pubkey"].as_str().unwrap(),
+                    hex::encode("video")
+                )]["event_id"],
+                newer["id"]
+            );
+        }
         assert!(
             requests1
                 .lock()
@@ -1045,7 +1048,9 @@ mod tests {
         let (meili, state) = fake_meili().await;
         // 1. The playlist is read while only `late` exists in the index.
         let (relay_a, _) = relay(vec![vec![late.clone()]], vec![playlist.clone()], false).await;
-        ingest(&meili, &[relay_a.clone()], true, 0).await.unwrap();
+        ingest(&meili, std::slice::from_ref(&relay_a), true, 0)
+            .await
+            .unwrap();
         {
             let guard = state.lock().unwrap();
             let docs = &guard.docs["videos"];

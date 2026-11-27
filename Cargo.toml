@@ -1,6 +1,6 @@
 [package]
 name = "nostube-search"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 default-run = "nostube-search"
@@ -35,3 +35,20 @@ tempfile = "3"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[lints.rust]
+# The project needs no `unsafe`; keep it that way.
+unsafe_code = "forbid"
+
+[lints.clippy]
+# A panic in a request handler or the indexer takes the whole process down.
+# Startup-only `expect` calls with a message are allowed individually.
+unwrap_used = "warn"
+expect_used = "warn"
+# Holding a std lock across `.await` can deadlock the async runtime.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+# Leftovers of debugging sessions and unfinished code.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

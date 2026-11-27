@@ -98,7 +98,7 @@ impl RateLimiter {
             };
         }
         let key = format!("{client}|{path}");
-        let mut state = self.state.lock().unwrap();
+        let mut state = crate::util::lock(&self.state);
         if !state.entries.contains_key(&key) {
             state.inserts += 1;
             if state.entries.len() >= 20_000 || state.inserts >= 1024 {

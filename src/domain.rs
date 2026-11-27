@@ -1,149 +1,10 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn language_normalization_and_precedence() {
-        assert_eq!(normalize_language(" PT_BR ").as_deref(), Some("pt-br"));
-        assert_eq!(
-            normalize_language("zh-Hant-TW").as_deref(),
-            Some("zh-hant-tw")
-        );
-        for s in ["", "e", "english", "en OR true", "en-"] {
-            assert_eq!(normalize_language(s), None);
-        }
-        assert_eq!(
-            normalize_languages(&["en,DE".into(), "de, pt_BR".into(), "invalid!".into()]),
-            vec!["en", "de", "pt-br"]
-        );
-        let t = vec![
-            vec!["locale".into(), "fr".into()],
-            vec!["lang".into(), "en".into()],
-            vec!["language".into(), "DE".into()],
-        ];
-        assert_eq!(first_language_tag(&t).as_deref(), Some("de"));
-    }
-    #[test]
-    fn title_and_malformed_tags() {
-        let e = json!({"tags":[["title","猫"],["bad",1],["imeta","alt Watch https://x.y/v now"]]});
-        let t = tags(&e);
-        assert_eq!(t.len(), 2);
-        assert_eq!(derive_video_title(&t, Some("content")), "猫");
-        assert_eq!(derive_video_title(&t[1..], None), "Watch now");
-        assert_eq!(
-            derive_video_title(&[], Some("跳个舞 https://x.y/v #美女")),
-            "跳个舞 #美女"
-        );
-        assert!(is_placeholder_title(Some(" Untitled Video ")));
-    }
-    #[test]
-    fn metadata_precedence_and_unicode_identifier() {
-        let event = json!({"id":"11".repeat(32),"pubkey":"22".repeat(32),"kind":34235,"created_at":123,"content":"hello", "tags":[["d","猫"],["thumb","first"],["image","second"],["imeta","url https://a/audio.mp3","m audio/mpeg","image third"],["imeta","url https://a/video.mp4","m video/mp4","dim 1920x1080","image fourth","fallback https://a/backup"],["language","DE"],["text-track","url https://a/sub","lang en"],["source","xhamster"]]});
-        let doc = event_to_document(&event, None, None, None, 0.5, None);
-        assert_eq!(doc["id"], format!("34235_{}_e78cab", "22".repeat(32)));
-        assert_eq!(doc["thumbnail"], "first");
-        assert_eq!(doc["videoUrl"], "https://a/video.mp4");
-        assert_eq!(doc["language"], "de");
-        assert_eq!(doc["contentWarning"], "NSFW");
-        assert_eq!(doc["captionLanguages"], json!(["en"]));
-        assert_eq!(doc["isHd"], true);
-        let source = event_to_source_hit(&event);
-        assert_eq!(source["videoUrl"], "https://a/audio.mp3");
-    }
-    #[test]
-    fn nip19_blocked_and_invalid_events() {
-        let pubkey = "90aaac10e033b4d1e607d426fc0eaabb9caa86720421dad8ae30182dd3efdb01";
-        assert_eq!(
-            normalize_author_pubkey(
-                "npub1jz42cy8qxw6dres86sn0cr42hww24pnjqssa4k9wxqvzm5l0mvqsq2f5ku"
-            )
-            .as_deref(),
-            Some(pubkey)
-        );
-        assert!(is_blocked_author(pubkey));
-        assert_eq!(normalize_author_pubkey("npub1invalid"), None);
-        assert!(!verify_event(&json!({"id":"bad"})));
-    }
-    #[test]
-    fn nip19_profile_and_signed_event_validation() {
-        let profile = "nprofile1qyxhwumn8ghj7mn0wvhxcmmvqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsz9nhwden5te0wfjkccte9ec8y6tdv9kzumn9wsq3gamnwvaz7tmwdaehgu3wdau8gu3wv3jhvqgcwaehxw309aex2mrp0yhxg6tkd9hx2tnkd9jx2mcqyzg24tqsuqemf50xql2zdlqw42aee25xwgzzrkkc4ccpstwnaldszz9qqn5";
-        assert_eq!(
-            normalize_author_pubkey(profile).as_deref(),
-            Some("90aaac10e033b4d1e607d426fc0eaabb9caa86720421dad8ae30182dd3efdb01")
-        );
-        use nostr_sdk::prelude::FinalizeEvent;
-        let keys = nostr_sdk::prelude::Keys::generate();
-        let event =
-            nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::from(1), "hello")
-                .finalize(&keys)
-                .unwrap();
-        let mut value = serde_json::to_value(event).unwrap();
-        assert!(verify_event(&value));
-        value["content"] = json!("tampered");
-        assert!(!verify_event(&value));
-    }
-    #[test]
-    fn vocabulary_counts_once_per_document() {
-        let docs = vec![
-            json!({"title":"Nostr NOSTR search","tags":["nostr","bitcoin"],"authorDisplayName":"Nostr Alice"}),
-            json!({"title":"Nostr videos","tags":[],"authorDisplayName":null}),
-        ];
-        let words = collect_words(&docs);
-        assert_eq!(words.get("nostr"), Some(&2));
-        assert_eq!(words.get("alice"), Some(&1));
-        assert!(!words.contains_key("the"));
-    }
-    #[test]
-    fn franc_language_detection_and_single_scripts() {
-        assert_eq!(
-            detect_language(
-                "Dies ist ein Video ueber Nostr und Bitcoin",
-                "Eine laengere Beschreibung hilft dabei, die Sprache eindeutig zu erkennen.",
-                None
-            )
-            .map(|x| x.0)
-            .as_deref(),
-            Some("de")
-        );
-        assert_eq!(
-            detect_language(
-                "This is a video about Nostr and Bitcoin",
-                "A longer description helps the detector identify the language reliably.",
-                None
-            )
-            .map(|x| x.0)
-            .as_deref(),
-            Some("en")
-        );
-        assert!(detect_language("Nostr update", "", None).is_none());
-        assert_eq!(
-            detect_language(&"한글".repeat(25), "", None)
-                .map(|x| x.0)
-                .as_deref(),
-            Some("ko")
-        );
-    }
-    #[test]
-    fn scoring_and_metadata_fallback() {
-        let event = json!({"id":"11".repeat(32),"pubkey":"22".repeat(32),"kind":21,"created_at":1,"content":"", "tags":[["title","Video"],["summary","Description"],["thumb","https://image"],["url","https://video.mp4"],["text-track","u","pt_BR"]]});
-        let doc = event_to_document(
-            &event,
-            Some(
-                &json!({"name":"A","username":"a","about":"b","picture":"c","nip05":"d","lud16":"e"}),
-            ),
-            Some(&json!({"reactionsCount":1,"commentsCount":1,"zapsCount":2,"notesCount":2})),
-            Some(&json!({"urlsAvailable":1,"urlsTotal":4})),
-            0.5,
-            None,
-        );
-        assert!((doc["authorProfileCompleteness"].as_f64().unwrap() - 1.0).abs() < 1e-12);
-        assert!((doc["videoMetadataCompleteness"].as_f64().unwrap() - 0.8).abs() < 1e-12);
-        assert_eq!(doc["language"], "pt-br");
-        assert_eq!(doc["languageSource"], "caption");
-        assert!((doc["rankingScore"].as_f64().unwrap() - 0.675).abs() < 1e-12);
-    }
-}
+// The `expect` calls in this file parse constant patterns and data embedded at
+// compile time (`include_str!`). A failure is a build-time programming error that
+// every test hits immediately, never a runtime condition.
+#![allow(
+    clippy::expect_used,
+    reason = "embedded data and constant patterns; failure is a build-time bug"
+)]
 
 use nostr_sdk::prelude::{Event, FromBech32, Nip19, PublicKey, ToBech32};
 use serde_json::{Value, json};
@@ -213,8 +74,9 @@ pub fn derive_video_title(tags: &[Vec<String>], content: Option<&str>) -> String
         .and_then(|t| t.iter().find_map(|s| s.strip_prefix("alt ")))
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    static URLS: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"https?://[^\s)]+").unwrap());
+    static URLS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"https?://[^\s)]+").expect("constant URL pattern")
+    });
     URLS.replace_all(alt.or(content).unwrap_or(""), " ")
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -268,10 +130,11 @@ pub fn nostube_url(hit: &Value) -> String {
     } else {
         "https://nostu.be/short"
     };
-    let encoded = if (30000..40000).contains(&kind) && hit["d_tag"].is_string() {
-        crate::nip19::address(hit["d_tag"].as_str().unwrap(), pubkey, kind as u32)
-    } else {
-        crate::nip19::event(id, pubkey)
+    let encoded = match hit["d_tag"].as_str() {
+        Some(d_tag) if (30000..40000).contains(&kind) => {
+            crate::nip19::address(d_tag, pubkey, kind as u32)
+        }
+        _ => crate::nip19::event(id, pubkey),
     }
     .unwrap_or_default();
     if kind == 21 {
@@ -375,7 +238,8 @@ fn detect_language(title: &str, summary: &str, content: Option<&str>) -> Option<
     type Model = HashMap<String, Vec<(String, HashMap<Vec<u16>, usize>)>>;
     static MODEL: LazyLock<Model> = LazyLock::new(|| {
         let raw: HashMap<String, Vec<(String, String)>> =
-            serde_json::from_str(include_str!("franc_model.json")).unwrap();
+            serde_json::from_str(include_str!("franc_model.json"))
+                .expect("embedded franc_model.json is valid");
         raw.into_iter()
             .map(|(script, languages)| {
                 let languages = languages
@@ -394,9 +258,11 @@ fn detect_language(title: &str, summary: &str, content: Option<&str>) -> Option<
             })
             .collect()
     });
-    static SCRIPTS: LazyLock<Vec<(String, Vec<(u32, u32)>)>> = LazyLock::new(|| {
+    type ScriptRanges = Vec<(String, Vec<(u32, u32)>)>;
+    static SCRIPTS: LazyLock<ScriptRanges> = LazyLock::new(|| {
         let raw: HashMap<String, Vec<(u32, u32)>> =
-            serde_json::from_str(include_str!("franc_scripts.json")).unwrap();
+            serde_json::from_str(include_str!("franc_scripts.json"))
+                .expect("embedded franc_scripts.json is valid");
         [
             "cmn",
             "Latin",
@@ -508,7 +374,8 @@ fn detect_language(title: &str, summary: &str, content: Option<&str>) -> Option<
 fn iso_language(s: &str) -> Option<String> {
     static LANGUAGES: std::sync::LazyLock<HashMap<String, String>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("franc_languages.json")).unwrap()
+            serde_json::from_str(include_str!("franc_languages.json"))
+                .expect("embedded franc_languages.json is valid")
         });
     normalize_language(LANGUAGES.get(s).map(String::as_str).unwrap_or(s))
 }
@@ -576,7 +443,8 @@ fn youtube(url: Option<&str>) -> bool {
             || h.ends_with(".youtu.be");
     }
     static YOUTUBE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?i)(^|//|\.)(youtube\.com|youtu\.be)(/|$)").unwrap()
+        regex::Regex::new(r"(?i)(^|//|\.)(youtube\.com|youtu\.be)(/|$)")
+            .expect("constant YouTube pattern")
     });
     YOUTUBE.is_match(s)
 }
@@ -775,13 +643,11 @@ pub fn event_to_document(
         _ => None,
     };
     let d = first_tag(&ts, "d");
-    let doc_id = if (30000..40000).contains(&kind) && d.is_some() {
-        format!(
-            "{kind}_{pubkey}_{}",
-            hex::encode(d.as_deref().unwrap().as_bytes())
-        )
-    } else {
-        id.to_owned()
+    let doc_id = match d.as_deref() {
+        Some(d) if (30000..40000).contains(&kind) => {
+            format!("{kind}_{pubkey}_{}", hex::encode(d.as_bytes()))
+        }
+        _ => id.to_owned(),
     };
     let npub = PublicKey::from_hex(pubkey)
         .ok()
@@ -885,4 +751,151 @@ pub fn event_to_document(
         })
         .cloned();
     json!({"id":doc_id,"event_id":id,"pubkey":pubkey,"npub":npub,"kind":kind,"identifier":d,"title":title,"summary":summary,"content_preview":crate::util::truncate(&summary,200),"content":content,"created_at":created,"published_at":published,"effectivePublishedAt":published.map(Value::from).unwrap_or(created),"duration":positive(first_tag(&ts,"duration")),"tags":topics,"thumbnail":thumbnail,"candidateThumbnails":candidates,"thumbnailBlurhash":playable.get("blurhash"),"videoUrl":video_url,"mimeType":mime,"mediaType":media,"dimensions":dimensions.as_ref().map(|x|&x.0),"width":width,"height":height,"isHd":height.unwrap_or(0)>=720,"isShort":kind==22||kind==34236,"isVideo":kind==21||kind==34235,"isNostrNative":native,"size":positive(playable.get("size").cloned()),"hash":hash,"fallbackUrls":fallbacks,"mediaAvailabilityKey":snapshot["mediaAvailabilityKey"],"availabilityStatus":snapshot["availabilityStatus"],"hasPlayableMedia":snapshot["hasPlayableMedia"],"playableUrl":snapshot["playableUrl"],"mediaCheckedAt":snapshot["mediaCheckedAt"],"mediaRetryAfter":snapshot["mediaRetryAfter"],"contentWarning":warning,"language":language,"languageSource":language_source,"languageConfidence":confidence,"captionLanguages":captions,"textTracks":tracks,"hasCaptions":!tracks.is_empty(),"origins":origins,"nostrUrl":nostube_url(&json!({"event_id":id,"pubkey":pubkey,"kind":kind,"d_tag":d})),"d_tag":d,"authorDisplayName":author_name,"relatedEventsTotal":num(counts,"relatedEventsTotal"),"reactionsCount":num(counts,"reactionsCount"),"commentsCount":num(counts,"commentsCount"),"zapsCount":num(counts,"zapsCount"),"urlsAvailable":available,"urlsTotal":total,"authorProfileCompleteness":author_score,"videoMetadataCompleteness":metadata_score,"globalTrustScore":trust,"rankingScore":ranking,"playlistScore":0})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn language_normalization_and_precedence() {
+        assert_eq!(normalize_language(" PT_BR ").as_deref(), Some("pt-br"));
+        assert_eq!(
+            normalize_language("zh-Hant-TW").as_deref(),
+            Some("zh-hant-tw")
+        );
+        for s in ["", "e", "english", "en OR true", "en-"] {
+            assert_eq!(normalize_language(s), None);
+        }
+        assert_eq!(
+            normalize_languages(&["en,DE".into(), "de, pt_BR".into(), "invalid!".into()]),
+            vec!["en", "de", "pt-br"]
+        );
+        let t = vec![
+            vec!["locale".into(), "fr".into()],
+            vec!["lang".into(), "en".into()],
+            vec!["language".into(), "DE".into()],
+        ];
+        assert_eq!(first_language_tag(&t).as_deref(), Some("de"));
+    }
+    #[test]
+    fn title_and_malformed_tags() {
+        let e = json!({"tags":[["title","猫"],["bad",1],["imeta","alt Watch https://x.y/v now"]]});
+        let t = tags(&e);
+        assert_eq!(t.len(), 2);
+        assert_eq!(derive_video_title(&t, Some("content")), "猫");
+        assert_eq!(derive_video_title(&t[1..], None), "Watch now");
+        assert_eq!(
+            derive_video_title(&[], Some("跳个舞 https://x.y/v #美女")),
+            "跳个舞 #美女"
+        );
+        assert!(is_placeholder_title(Some(" Untitled Video ")));
+    }
+    #[test]
+    fn metadata_precedence_and_unicode_identifier() {
+        let event = json!({"id":"11".repeat(32),"pubkey":"22".repeat(32),"kind":34235,"created_at":123,"content":"hello", "tags":[["d","猫"],["thumb","first"],["image","second"],["imeta","url https://a/audio.mp3","m audio/mpeg","image third"],["imeta","url https://a/video.mp4","m video/mp4","dim 1920x1080","image fourth","fallback https://a/backup"],["language","DE"],["text-track","url https://a/sub","lang en"],["source","xhamster"]]});
+        let doc = event_to_document(&event, None, None, None, 0.5, None);
+        assert_eq!(doc["id"], format!("34235_{}_e78cab", "22".repeat(32)));
+        assert_eq!(doc["thumbnail"], "first");
+        assert_eq!(doc["videoUrl"], "https://a/video.mp4");
+        assert_eq!(doc["language"], "de");
+        assert_eq!(doc["contentWarning"], "NSFW");
+        assert_eq!(doc["captionLanguages"], json!(["en"]));
+        assert_eq!(doc["isHd"], true);
+        let source = event_to_source_hit(&event);
+        assert_eq!(source["videoUrl"], "https://a/audio.mp3");
+    }
+    #[test]
+    fn nip19_blocked_and_invalid_events() {
+        let pubkey = "90aaac10e033b4d1e607d426fc0eaabb9caa86720421dad8ae30182dd3efdb01";
+        assert_eq!(
+            normalize_author_pubkey(
+                "npub1jz42cy8qxw6dres86sn0cr42hww24pnjqssa4k9wxqvzm5l0mvqsq2f5ku"
+            )
+            .as_deref(),
+            Some(pubkey)
+        );
+        assert!(is_blocked_author(pubkey));
+        assert_eq!(normalize_author_pubkey("npub1invalid"), None);
+        assert!(!verify_event(&json!({"id":"bad"})));
+    }
+    #[test]
+    fn nip19_profile_and_signed_event_validation() {
+        let profile = "nprofile1qyxhwumn8ghj7mn0wvhxcmmvqy28wumn8ghj7un9d3shjtnyv9kh2uewd9hsz9nhwden5te0wfjkccte9ec8y6tdv9kzumn9wsq3gamnwvaz7tmwdaehgu3wdau8gu3wv3jhvqgcwaehxw309aex2mrp0yhxg6tkd9hx2tnkd9jx2mcqyzg24tqsuqemf50xql2zdlqw42aee25xwgzzrkkc4ccpstwnaldszz9qqn5";
+        assert_eq!(
+            normalize_author_pubkey(profile).as_deref(),
+            Some("90aaac10e033b4d1e607d426fc0eaabb9caa86720421dad8ae30182dd3efdb01")
+        );
+        use nostr_sdk::prelude::FinalizeEvent;
+        let keys = nostr_sdk::prelude::Keys::generate();
+        let event =
+            nostr_sdk::prelude::EventBuilder::new(nostr_sdk::prelude::Kind::from(1), "hello")
+                .finalize(&keys)
+                .unwrap();
+        let mut value = serde_json::to_value(event).unwrap();
+        assert!(verify_event(&value));
+        value["content"] = json!("tampered");
+        assert!(!verify_event(&value));
+    }
+    #[test]
+    fn vocabulary_counts_once_per_document() {
+        let docs = vec![
+            json!({"title":"Nostr NOSTR search","tags":["nostr","bitcoin"],"authorDisplayName":"Nostr Alice"}),
+            json!({"title":"Nostr videos","tags":[],"authorDisplayName":null}),
+        ];
+        let words = collect_words(&docs);
+        assert_eq!(words.get("nostr"), Some(&2));
+        assert_eq!(words.get("alice"), Some(&1));
+        assert!(!words.contains_key("the"));
+    }
+    #[test]
+    fn franc_language_detection_and_single_scripts() {
+        assert_eq!(
+            detect_language(
+                "Dies ist ein Video ueber Nostr und Bitcoin",
+                "Eine laengere Beschreibung hilft dabei, die Sprache eindeutig zu erkennen.",
+                None
+            )
+            .map(|x| x.0)
+            .as_deref(),
+            Some("de")
+        );
+        assert_eq!(
+            detect_language(
+                "This is a video about Nostr and Bitcoin",
+                "A longer description helps the detector identify the language reliably.",
+                None
+            )
+            .map(|x| x.0)
+            .as_deref(),
+            Some("en")
+        );
+        assert!(detect_language("Nostr update", "", None).is_none());
+        assert_eq!(
+            detect_language(&"한글".repeat(25), "", None)
+                .map(|x| x.0)
+                .as_deref(),
+            Some("ko")
+        );
+    }
+    #[test]
+    fn scoring_and_metadata_fallback() {
+        let event = json!({"id":"11".repeat(32),"pubkey":"22".repeat(32),"kind":21,"created_at":1,"content":"", "tags":[["title","Video"],["summary","Description"],["thumb","https://image"],["url","https://video.mp4"],["text-track","u","pt_BR"]]});
+        let doc = event_to_document(
+            &event,
+            Some(
+                &json!({"name":"A","username":"a","about":"b","picture":"c","nip05":"d","lud16":"e"}),
+            ),
+            Some(&json!({"reactionsCount":1,"commentsCount":1,"zapsCount":2,"notesCount":2})),
+            Some(&json!({"urlsAvailable":1,"urlsTotal":4})),
+            0.5,
+            None,
+        );
+        assert!((doc["authorProfileCompleteness"].as_f64().unwrap() - 1.0).abs() < 1e-12);
+        assert!((doc["videoMetadataCompleteness"].as_f64().unwrap() - 0.8).abs() < 1e-12);
+        assert_eq!(doc["language"], "pt-br");
+        assert_eq!(doc["languageSource"], "caption");
+        assert!((doc["rankingScore"].as_f64().unwrap() - 0.675).abs() < 1e-12);
+    }
 }

@@ -53,6 +53,10 @@ struct AppState {
     recommendations: RecommendationService,
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "startup only: a bad CORS_ORIGIN must stop the server"
+)]
 pub fn router(meili: Meili) -> Router {
     let state = Arc::new(AppState {
         recommendations: RecommendationService::new(meili.clone()),
@@ -82,8 +86,11 @@ pub fn router(meili: Meili) -> Router {
         let cors = if origin == "*" {
             CorsLayer::new().allow_origin(Any)
         } else {
-            CorsLayer::new()
-                .allow_origin(origin.parse::<HeaderValue>().expect("Invalid CORS_ORIGIN"))
+            CorsLayer::new().allow_origin(
+                origin
+                    .parse::<HeaderValue>()
+                    .expect("CORS_ORIGIN is not a valid header value"),
+            )
         };
         api = api.layer(
             cors.allow_methods([
@@ -110,24 +117,36 @@ pub fn router(meili: Meili) -> Router {
         .with_state(state)
         .layer(CompressionLayer::new())
 }
+/// Up to five distinct, non-empty titles; media known to be unavailable is skipped.
+fn suggestion_titles(hits: &Value) -> Vec<String> {
+    let mut titles: Vec<String> = Vec::new();
+    for hit in hits.as_array().into_iter().flatten() {
+        if hit["availabilityStatus"] == "unavailable" {
+            continue;
+        }
+        let title = hit["title"].as_str().unwrap_or("").trim();
+        if !title.is_empty() && !titles.iter().any(|known| known == title) {
+            titles.push(title.to_owned());
+        }
+        if titles.len() == 5 {
+            break;
+        }
+    }
+    titles
+}
 fn json_response(status: u16, value: Value) -> Response {
-    (StatusCode::from_u16(status).unwrap(), Json(value)).into_response()
+    // A code outside 100..=999 is a programming error; answer 500 instead of crashing.
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, Json(value)).into_response()
 }
 fn rate_headers(response: &mut Response, decision: &RateDecision) {
-    for (key, value) in [
-        ("ratelimit-limit", decision.limit),
-        ("ratelimit-remaining", decision.remaining),
-        ("ratelimit-reset", decision.reset_seconds),
-    ] {
-        response
-            .headers_mut()
-            .insert(key, HeaderValue::from_str(&value.to_string()).unwrap());
-    }
+    // Decimal digits are always a valid header value, so `from` cannot fail.
+    let headers = response.headers_mut();
+    headers.insert("ratelimit-limit", HeaderValue::from(decision.limit));
+    headers.insert("ratelimit-remaining", HeaderValue::from(decision.remaining));
+    headers.insert("ratelimit-reset", HeaderValue::from(decision.reset_seconds));
     if !decision.allowed {
-        response.headers_mut().insert(
-            "retry-after",
-            HeaderValue::from_str(&decision.retry_after.to_string()).unwrap(),
-        );
+        headers.insert("retry-after", HeaderValue::from(decision.retry_after));
     }
 }
 async fn public_middleware(
@@ -193,9 +212,10 @@ async fn public_middleware(
             env_nonnegative("API_CACHE_MAX_AGE_S", 60),
             env_nonnegative("API_CACHE_SWR_S", 300)
         );
-        response
-            .headers_mut()
-            .insert("cache-control", HeaderValue::from_str(&value).unwrap());
+        // Only ASCII text and digits: always a valid value, `Ok` is the only case.
+        if let Ok(value) = HeaderValue::from_str(&value) {
+            response.headers_mut().insert("cache-control", value);
+        }
     }
     response
 }
@@ -226,14 +246,14 @@ async fn policy(
     state: &AppState,
     preset: &str,
     nsfw: &str,
-) -> Result<(SafetyInput, Value), Response> {
-    let safety =
-        safety::resolve_safety_input(preset, nsfw).map_err(|(s, v)| json_response(s, v))?;
+) -> Result<(SafetyInput, Value), Box<Response>> {
+    let safety = safety::resolve_safety_input(preset, nsfw)
+        .map_err(|(s, v)| Box::new(json_response(s, v)))?;
     let policy = match &safety.preset_pubkey {
         Some(pk) => state.presets.get_preset(pk).await,
         None => Some(safety::default_policy()),
     }
-    .ok_or_else(|| json_response(503, json!({"code":"preset_unavailable"})))?;
+    .ok_or_else(|| Box::new(json_response(503, json!({"code":"preset_unavailable"}))))?;
     Ok((safety, policy))
 }
 fn preset_filters(safety: &SafetyInput, policy: &Value) -> Vec<String> {
@@ -454,7 +474,7 @@ async fn data(
     .await
     {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let is_tags = path == "/api/tags";
     let q = if is_tags {
@@ -480,12 +500,17 @@ async fn data(
             safety.preset_pubkey.as_deref().unwrap_or(""),
             q
         );
-        let result=state.suggestions.get_or_try_insert(key,60_000,||async{
-            let mut body=json!({"q":q,"limit":10,"offset":0,"attributesToRetrieve":["title","availabilityStatus"]});if !safety_filters.is_empty(){body["filter"]=json!(safety_filters);}
-            let result=video_search(&state.meili,body).await?;let mut titles=Vec::new();
-            for hit in result["hits"].as_array().into_iter().flatten(){if hit["availabilityStatus"]=="unavailable"{continue;}let title=hit["title"].as_str().unwrap_or("").trim();if !title.is_empty()&&!titles.iter().any(|v|v==title){titles.push(title.to_owned());}if titles.len()==5{break;}}
-            Ok(json!(titles))
-        }).await;
+        let result = state
+            .suggestions
+            .get_or_try_insert(key, 60_000, || async {
+                let mut body = json!({"q":q,"limit":10,"offset":0,"attributesToRetrieve":["title","availabilityStatus"]});
+                if !safety_filters.is_empty() {
+                    body["filter"] = json!(safety_filters);
+                }
+                let result = video_search(&state.meili, body).await?;
+                Ok(json!(suggestion_titles(&result["hits"])))
+            })
+            .await;
         return match result {
             Ok(values) => Json(json!({"suggestions":values})).into_response(),
             Err(_) => json_response(502, json!({"error":"Search engine unavailable"})),
@@ -600,7 +625,7 @@ async fn related(State(state): State<Arc<AppState>>, request: Request) -> Respon
     .await
     {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let reference = match body["videoRef"].as_str().filter(|s| !s.trim().is_empty()) {
         Some(r) => r,

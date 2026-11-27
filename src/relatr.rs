@@ -62,18 +62,39 @@ fn extract_scores(result: &Value) -> Vec<Value> {
     }
 }
 
-struct ClientGuard(Option<Client>);
+/// Closes the relay connection when dropped, e.g. when a call is cancelled by a
+/// timeout. The orderly path calls `close` itself and disarms the drop.
+struct ClientGuard {
+    client: Client,
+    closed: bool,
+}
+
+impl ClientGuard {
+    fn new() -> Self {
+        Self {
+            client: Client::new(),
+            closed: false,
+        }
+    }
+    async fn close(&mut self) {
+        self.closed = true;
+        let timeout = Duration::from_millis(env_u64("TRUST_SCORE_DISCONNECT_TIMEOUT_MS", 2_000));
+        let _ = tokio::time::timeout(timeout, self.client.shutdown()).await;
+    }
+}
 
 impl Drop for ClientGuard {
     fn drop(&mut self) {
-        if let Some(client) = self.0.take() {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    let timeout =
-                        Duration::from_millis(env_u64("TRUST_SCORE_DISCONNECT_TIMEOUT_MS", 2_000));
-                    let _ = tokio::time::timeout(timeout, client.shutdown()).await;
-                });
-            }
+        if self.closed {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let client = self.client.clone();
+            handle.spawn(async move {
+                let timeout =
+                    Duration::from_millis(env_u64("TRUST_SCORE_DISCONNECT_TIMEOUT_MS", 2_000));
+                let _ = tokio::time::timeout(timeout, client.shutdown()).await;
+            });
         }
     }
 }
@@ -89,8 +110,8 @@ pub async fn call_tool(pubkeys: &[String]) -> Result<Value> {
 
 async fn call_tool_at(pubkeys: &[String], relay: &str, server: PublicKey) -> Result<Value> {
     let keys = Keys::generate();
-    let mut guard = ClientGuard(Some(Client::new()));
-    let client = guard.0.as_ref().unwrap();
+    let mut guard = ClientGuard::new();
+    let client = guard.client.clone();
     let result = async {
         client.add_relay(relay).await?;
         client.connect().await;
@@ -163,22 +184,18 @@ async fn call_tool_at(pubkeys: &[String], relay: &str, server: PublicKey) -> Res
         Err(anyhow!("ContextVM connection closed"))
     }
     .await;
-    let _ = tokio::time::timeout(
-        Duration::from_millis(env_u64("TRUST_SCORE_DISCONNECT_TIMEOUT_MS", 2_000)),
-        guard.0.as_ref().unwrap().shutdown(),
-    )
-    .await;
-    guard.0.take();
+    guard.close().await;
     result
 }
 
 pub async fn fetch_trust_scores(pubkeys: &[String]) -> HashMap<String, f64> {
-    fetch_trust_scores_at(
-        pubkeys,
-        "wss://relay2.contextvm.org",
-        PublicKey::parse(SERVER).expect("valid relatr pubkey"),
-    )
-    .await
+    // The server key is a constant. Should it ever be invalid, behave like an
+    // unreachable relatr: callers fall back to the neutral default score.
+    let Ok(server) = PublicKey::parse(SERVER) else {
+        eprintln!("[TrustScore] invalid server public key, using cached scores only");
+        return storage::trust_get_many(pubkeys);
+    };
+    fetch_trust_scores_at(pubkeys, "wss://relay2.contextvm.org", server).await
 }
 
 async fn fetch_trust_scores_at(

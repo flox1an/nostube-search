@@ -195,17 +195,12 @@ mod tests {
             c2.clone(),
             c3.clone(),
         );
+        type HandlerState = (Arc<Mutex<Vec<Value>>>, Value, Value, Value, Value);
         let app = Router::new()
             .route(
                 "/indexes/videos/search",
                 post(
-                    |State((requests, source, c1, c2, c3)): State<(
-                        Arc<Mutex<Vec<Value>>>,
-                        Value,
-                        Value,
-                        Value,
-                        Value,
-                    )>,
+                    |State((requests, source, c1, c2, c3)): State<HandlerState>,
                      Json(body): Json<Value>| async move {
                         let mut requests = requests.lock().unwrap();
                         requests.push(body.clone());
@@ -253,13 +248,15 @@ mod tests {
             authors.iter().position(|v| *v == "22".repeat(32)).unwrap()
                 < authors.iter().position(|v| *v == "00".repeat(32)).unwrap()
         );
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 4);
-        assert_eq!(requests[1]["q"], "Nostr nostr Nostr nostr");
-        assert!(requests[1]["filter"].to_string().contains("language = "));
-        assert!(requests[1]["filter"].to_string().contains("safe = true"));
-        assert_eq!(requests[2]["limit"], 2);
-        assert_eq!(requests[3]["sort"], json!(["rankingScore:desc"]));
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 4);
+            assert_eq!(requests[1]["q"], "Nostr nostr Nostr nostr");
+            assert!(requests[1]["filter"].to_string().contains("language = "));
+            assert!(requests[1]["filter"].to_string().contains("safe = true"));
+            assert_eq!(requests[2]["limit"], 2);
+            assert_eq!(requests[3]["sort"], json!(["rankingScore:desc"]));
+        }
         drop(requests);
         let address = encoded(
             "naddr",

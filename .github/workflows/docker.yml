@@ -11,7 +11,23 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nostube-search
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Check Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
   build:
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -99,7 +115,7 @@ jobs:
   # Meldet einen kaputten Lauf sofort rot, statt ihn erst durch Stille auffallen zu lassen.
   # Eigener Job, weil ein Fehler im build-Job den deploy-Job gar nicht erst startet.
   notify-failure:
-    needs: [build, deploy]
+    needs: [quality, build, deploy]
     if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
