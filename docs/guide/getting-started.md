@@ -1,6 +1,6 @@
 # Getting started
 
-Nostube Search reads video events from Nostr relays and serves a MeiliSearch-backed HTTP API with a small built-in search UI. It indexes metadata and links to media; it does not host or transcode video files.
+Nostube Search reads video events from Nostr relays and serves a MeiliSearch-backed HTTP API. It indexes metadata and links to media; it does not host or transcode video files.
 
 ## Run with Docker Compose
 
@@ -25,7 +25,7 @@ Compose starts three services:
 
 | Service | Purpose | Default access |
 | --- | --- | --- |
-| `api` | HTTP API, web UI and background indexer in one process | `http://localhost:3001` |
+| `api` | HTTP API and background indexer in one process | `http://localhost:3001` |
 | `meilisearch` | Search indices and durable availability records | `http://127.0.0.1:7700`, loopback only |
 | `meilisearch-ui` | Administrative dashboard | `http://127.0.0.1:24900`, loopback only |
 
@@ -45,8 +45,6 @@ curl --fail --get http://localhost:3001/api/search \
   --data-urlencode 'q=nostr' \
   --data-urlencode 'limit=5'
 ```
-
-Open `http://localhost:3001` to use the built-in search UI. If you changed `API_PORT`, use that port instead.
 
 The indexer runs automatically, not as a separate one-shot job. A fresh, empty instance starts a full index build; an existing populated index remains searchable immediately and is adopted even if scheduler state is absent. Existing state controls the normal schedules. On the first boot, health requests may fail briefly while MeiliSearch starts; `/health` checks connectivity, **not indexing completion**. An empty result set can also mean the configured relays contain no matching videos.
 

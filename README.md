@@ -1,6 +1,6 @@
 # nostube-search
 
-Nostr video search engine — Rust HTTP server and background indexer, MeiliSearch-backed API and built-in web UI. The runtime container contains no Node.js.
+Nostr video search engine — Rust HTTP API and background indexer backed by MeiliSearch. The runtime container contains no Node.js.
 
 ## Documentation
 
@@ -21,7 +21,7 @@ docker compose up -d
 curl --fail http://localhost:3001/health
 ```
 
-Open `http://localhost:3001` for the search UI. The API and indexer run together: full rebuilds default to every 24 hours, incremental updates to every 10 minutes. On a fresh instance, wait for the initial full index build before expecting results. `/health` checks MeiliSearch connectivity, not indexing completion.
+The API and indexer run together: full rebuilds default to every 24 hours, incremental updates to every 10 minutes. On a fresh instance, wait for the initial full index build before expecting results. `/health` checks MeiliSearch connectivity, not indexing completion.
 
 Compose uses the published API image and stores data in the `meilisearch_data` and `api_cache` named volumes. MeiliSearch (`127.0.0.1:7700`) and its admin UI (`127.0.0.1:24900`) are loopback-only; do not expose them publicly. For source development, see [Getting started](docs/guide/getting-started.md#run-the-source-locally).
 

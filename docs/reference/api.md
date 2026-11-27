@@ -1,6 +1,6 @@
 # HTTP API
 
-The API is unauthenticated. All data endpoints live under `/api/*`; responses are JSON. Successful `GET /api/*` responses carry `Cache-Control` headers for CDN/reverse-proxy caching. The built-in web UI is served at `/`; `/health` checks MeiliSearch connectivity.
+The API is unauthenticated. All data endpoints live under `/api/*`; responses are JSON. Successful `GET /api/*` responses carry `Cache-Control` headers for CDN/reverse-proxy caching. `/` returns 404; `/health` checks MeiliSearch connectivity.
 
 Base URL in the default Compose setup: `http://localhost:3001`.
 
@@ -213,10 +213,6 @@ curl --fail http://localhost:3001/health
 ### `GET /sitemap.xml`
 
 SEO sitemap with top video and author URLs. Cached for 6 hours in-process. Related variables: `SITEMAP_SITE_ORIGIN`, `SITEMAP_MAX_URLS` (cap 50 000), `SITEMAP_MAX_AUTHORS`, `SITEMAP_AUTHOR_MIN_VIDEOS`.
-
-### `GET /`
-
-Built-in search UI (static HTML/JS from `src/api/public`).
 
 ## Safety parameters
 

@@ -105,7 +105,6 @@ pub fn router(meili: Meili) -> Router {
         );
     }
     Router::new()
-        .route("/", get(ui))
         .route("/health", get(health))
         .route("/healthz", get(|| async { Json(json!({"ok":true})) }))
         .route("/sitemap.xml", get(sitemap))
@@ -673,14 +672,6 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
         Ok(_) => Json(json!({"ok":true})).into_response(),
         Err(_) => json_response(502, json!({"ok":false})),
     }
-}
-async fn ui() -> Response {
-    (
-        StatusCode::OK,
-        [("content-type", "text/html; charset=utf-8")],
-        include_str!("api/public/index.html"),
-    )
-        .into_response()
 }
 async fn sitemap(State(state): State<Arc<AppState>>) -> Response {
     match state

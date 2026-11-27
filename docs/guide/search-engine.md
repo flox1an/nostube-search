@@ -134,7 +134,3 @@ Search keeps full recall unless the caller passes `available=true` (only verifie
 - exclusion of known-unavailable media by default.
 
 The result is a scored, deduplicated list of related videos. It is not a collaborative-filtering model; it is a deterministic blend of content overlap, user signal and safety filters.
-
-## Built-in web UI
-
-The API serves a small static search UI at `/` from `src/api/public`. It uses the same public endpoints documented in the [API reference](../reference/api) and is a starting point for your own client, not a required component.

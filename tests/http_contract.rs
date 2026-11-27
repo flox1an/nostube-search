@@ -137,17 +137,11 @@ async fn health_and_liveness_have_distinct_upstream_contracts() {
     assert_eq!(body, json!({"ok":false}));
 }
 #[tokio::test]
-async fn static_ui_is_still_served() {
+async fn root_returns_not_found() {
     let h = Harness::new(json!([])).await;
-    let (s, headers, b) = h.get("/").await;
-    assert_eq!(s, 200);
-    assert!(
-        headers["content-type"]
-            .to_str()
-            .unwrap()
-            .contains("text/html")
-    );
-    assert!(b.as_str().unwrap().contains("/api/search"));
+    let (status, _, _) = h.get("/").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(h.calls().is_empty());
 }
 #[tokio::test]
 async fn query_validation_does_not_query_meili() {
