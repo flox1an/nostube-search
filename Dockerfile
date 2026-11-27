@@ -1,38 +1,20 @@
-# ---- Build stage ----
-FROM node:24.22.1-slim AS builder
-
+# syntax=docker/dockerfile:1
+FROM rust:1.99.1-bookworm AS builder
 WORKDIR /app
-
-COPY package*.json ./
-RUN npm ci
-
-COPY tsconfig.json ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY tests ./tests
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo test --locked --all-targets && cargo build --release --locked
 
-RUN npx tsc --project tsconfig.json
-
-
-# ---- Runtime stage ----
-FROM node:24.22.1-slim AS runner
+FROM debian:bookworm-slim AS runner
 RUN apt-get update \
-    && apt-get install -y ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-
 WORKDIR /app
-
-COPY package*.json ./
-RUN npm ci --omit=dev
-
-COPY --from=builder /app/dist ./dist
-
-# Static UI assets must be at src/api/public/ relative to WORKDIR
-# (matches the hardcoded path in server.ts)
-COPY src/api/public ./src/api/public
-
-ENV NODE_ENV=production
+COPY --from=builder /app/target/release/nostube-search /usr/local/bin/nostube-search
+COPY src/franc-LICENSE /usr/local/share/licenses/nostube-search/franc-LICENSE
 ENV PORT=3001
-
 EXPOSE 3001
-
-CMD ["node", "dist/index.js"]
+CMD ["nostube-search"]

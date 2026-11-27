@@ -29,7 +29,7 @@ For every event, the indexer parses tags and `imeta` entries to build a search d
 - **Fallback/mirror URLs** from `imeta` `fallback`/`mirror` values.
 - **Captions** from `text-track` tags, including their languages.
 - **Language** from the `language`/`lang`/`locale` tag first. If absent, a local detector classifies title/summary/content; if still unknown, a single caption language is used. Source and confidence are stored (`tag`, `local`, or `caption`).
-- **Content warnings** from explicit tags plus platform-detected NSFW attributes (see [`nsfw-platform-detection.ts`](https://github.com/flox1an/nostube-search/blob/main/src/nsfw-platform-detection.ts)).
+- **Content warnings** from explicit tags plus platform-detected NSFW attributes (see [`domain.rs`](https://github.com/flox1an/nostube-search/blob/main/src/domain.rs)).
 - **Origins** from `origin` tags (e.g. mirrored YouTube content), used for the `isNostrNative` flag.
 - **`nostrUrl`** — a canonical `https://nostu.be/v/...` or `/short/...` link built from the event's `nevent`/`naddr`.
 

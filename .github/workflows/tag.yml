@@ -1,4 +1,4 @@
-# After a merge to main, tag v<version from package.json> unless that tag exists.
+# After a merge to main, tag v<version from Cargo.toml> unless that tag exists.
 # Version bumps happen inside PRs (e.g. the audit automation); tagging stays deterministic.
 name: Tag release
 
@@ -17,7 +17,7 @@ jobs:
 
       - name: Tag version
         run: |
-          v="v$(node -p 'require("./package.json").version')"
+          v="$(python3 -c 'import tomllib; print("v" + tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           if git ls-remote --exit-code --tags origin "refs/tags/$v" >/dev/null; then
             echo "$v already tagged"
             exit 0

@@ -1,4 +1,4 @@
-# Daily dependency audit. When npm audit reports vulnerabilities and no `dependencies`
+# Daily Rust dependency audit. When cargo audit reports vulnerabilities and no `dependencies`
 # issue is open, it opens one issue labeled for the Orca issue worker. It never changes code.
 name: Dependency audit
 
@@ -17,16 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
 
       - name: Audit and open issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          npm audit --json > audit.json || true
-          count=$(jq '.metadata.vulnerabilities.total' audit.json)
+          cargo audit --json > audit.json || true
+          count=$(jq '.vulnerabilities.list | length' audit.json)
           echo "vulnerabilities: $count"
           if [ "$count" = null ]; then cat audit.json; exit 1; fi
           if [ "$count" = 0 ]; then exit 0; fi
@@ -37,18 +38,18 @@ jobs:
           {
             echo "## Problem"
             echo
-            echo "The daily \`npm audit\` reports $count vulnerabilities."
+            echo "The daily \`cargo audit\` reports $count vulnerabilities."
             echo
             echo '```'
-            npm audit || true
+            cargo audit || true
             echo '```'
             echo
             echo "## Acceptance criteria"
             echo
-            echo "- [ ] \`npm audit\` reports 0 vulnerabilities, or the PR explains each remaining one (no fix released, needs a major upgrade)."
-            echo "- [ ] \`npm test\` and \`npx tsc --noEmit\` pass."
-            echo "- [ ] Patch version raised with \`npm version patch --no-git-tag-version\` (no tag; CI tags after the merge)."
+            echo "- [ ] \`cargo audit\` reports 0 vulnerabilities, or the PR explains each remaining one."
+            echo "- [ ] \`cargo test --locked --all-targets\` passes."
+            echo "- [ ] Package version raised in \`Cargo.toml\` (CI tags after the merge)."
           } > body.full
           head -c 60000 body.full > body.md
-          gh issue create --title "Security: npm audit reports $count vulnerabilities" \
+          gh issue create --title "Security: cargo audit reports $count vulnerabilities" \
             --label dependencies --label type:maintenance --label ready-for-agent --body-file body.md

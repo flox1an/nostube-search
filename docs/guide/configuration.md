@@ -40,14 +40,15 @@ The indexer queries each source relay individually and pages through it; add rel
 | `INDEXER_INCREMENTAL_INTERVAL_MS` | `600000` (10 min) | How often the indexer fetches newly published video events and upserts them into the live index. |
 | `INDEXER_FULL_INTERVAL_MS` | `86400000` (24 h) | How often a full re-index with rolling swap runs. |
 | `INDEXER_FULL_RETRY_MS` | `900000` (15 min) | Minimum gap before a failed or interrupted full re-index (e.g. after a crash) is retried. The start of every full run is persisted in the scheduler state, so a container restart mid-run does not start a new full pass immediately. |
-| `FORCE_FULL_REINDEX` | `false` | Set `true` to run one rolling-swap full re-index at process startup, then set it back to `false` and restart. Startup already runs a full pass when no saved scheduler state exists. |
+| `FORCE_FULL_REINDEX` | `false` | Explicit opt-in for a rolling-swap full re-index at process startup. Leave false for a Rust upgrade; existing indexes are adopted without a migration rebuild. |
 | `MEILI_TASK_TIMEOUT_MS` | `120000` | Timeout for waiting on MeiliSearch write tasks. Too small a value can abort a long full re-index, which then retries from zero. |
 | `FETCH_TRUST_SCORES` | `true` in Compose, off when unset in source | Fetch author trust scores via ContextVM/relatr. When disabled or unavailable, every author gets default `0.5`. |
 | `PLAYLIST_SCORE_INTERVAL_MS` | `21600000` (6 h) | Interval for the playlist score pass. |
 | `PLAYLIST_MIN_TRUST_SCORE` | `0.1` | Minimum trust score for a playlist author to contribute. |
 | `PLAYLIST_FETCH_LIMIT` | `5000` | Pagination stopping threshold for accumulated playlist events; a full page can exceed it. |
+| `PLAYLIST_SCORES_PATH` | `.playlist-scores.json` in the working directory; Compose: `/data/cache/.playlist-scores.json` | Stores each video's playlist score outside the search index. Re-indexing a video re-applies it, and a video indexed after its playlist still receives its score. Playlist references to videos that are not indexed never create empty documents. |
 
-Scheduler state (last run timestamps) lives at `INDEXER_STATE_PATH` (default `.indexer-state.json` in the working directory; Compose: `/data/cache/.indexer-state.json`). Deleting it makes the next startup run a full re-index.
+Scheduler state (last-run timestamps in milliseconds) lives at `INDEXER_STATE_PATH` (default `.indexer-state.json` in the working directory; Compose: `/data/cache/.indexer-state.json`). The Rust runtime reads existing state unchanged. If state is missing but the video index is populated, it adopts that data rather than crawling from zero.
 
 ## Media availability checking
 
@@ -80,7 +81,7 @@ Cache files live in the `api_cache` Docker volume by default (paths below are th
 
 ## Trust score client
 
-Only relevant when `FETCH_TRUST_SCORES=true`. The relatr server and relay (`wss://relay2.contextvm.org`) are currently fixed in `src/indexer/relatr.ts`, not configurable through environment variables. The optional timeout and batch controls below are not forwarded by the supplied Compose file.
+Only relevant when `FETCH_TRUST_SCORES=true`. The relatr server and relay (`wss://relay2.contextvm.org`) are fixed in `src/relatr.rs`, not configurable through environment variables. The optional timeout and batch controls below are not forwarded by the supplied Compose file.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -183,4 +184,4 @@ The following application settings require adding entries to `api.environment` b
 - `NOSTUBE_BLOCKED_AUTHORS` / `BLOCKED_AUTHOR_NPUBS`
 - `RELAY_HINT_ALLOW_INSECURE`, `RELAY_HINT_ALLOW_PRIVATE`, `RELAY_HINT_DNS_TIMEOUT_MS`
 
-Compose fixes `PORT=3001`, `MEILI_URL=http://meilisearch:7700` and the cache/state/lock paths under `/data/cache`. Change those in Compose itself, not just in `.env`. Direct source execution via `npm start` loads `.env` before imports, so the application variables are available without container forwarding.
+Compose fixes `PORT=3001`, `MEILI_URL=http://meilisearch:7700` and the cache/state/lock paths under `/data/cache`. Change those in Compose itself, not just in `.env`. Direct source execution via `cargo run --release --locked` loads `.env` before startup, so application variables are available without container forwarding.

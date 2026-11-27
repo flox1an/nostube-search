@@ -1,6 +1,6 @@
 # nostube-search
 
-Nostr video search engine — MeiliSearch-backed HTTP API, built-in web UI and automatic background indexing.
+Nostr video search engine — Rust HTTP server and background indexer, MeiliSearch-backed API and built-in web UI. The runtime container contains no Node.js.
 
 ## Documentation
 
@@ -25,9 +25,11 @@ Open `http://localhost:3001` for the search UI. The API and indexer run together
 
 Compose uses the published API image and stores data in the `meilisearch_data` and `api_cache` named volumes. MeiliSearch (`127.0.0.1:7700`) and its admin UI (`127.0.0.1:24900`) are loopback-only; do not expose them publicly. For source development, see [Getting started](docs/guide/getting-started.md#run-the-source-locally).
 
+The Rust image replaces the former Node.js image without rebuilding the index: keep the same MeiliSearch version, `data/` mounts, `meilisearch_data` and `api_cache` volumes. Pull and recreate only `api`; leave `FORCE_FULL_REINDEX=false`. Existing scheduler state and cache files remain compatible. See [upgrading to Rust](docs/guide/operations.md#upgrading-from-nodejs-to-rust).
+
 ## Documentation development
 
-The docs are a separate npm package; application dependencies and Docker builds are unchanged.
+The docs are a separate npm package. Node.js is needed only to build this static documentation site, not to build or run the application.
 
 ```bash
 cd docs

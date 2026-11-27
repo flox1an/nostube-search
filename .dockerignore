@@ -1,0 +1,10 @@
+.git
+node_modules
+docs
+src/**/*.ts
+data
+dist
+target
+.env
+.*cache*
+.indexer-state.json

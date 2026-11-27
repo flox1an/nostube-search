@@ -48,19 +48,19 @@ curl --fail --get http://localhost:3001/api/search \
 
 Open `http://localhost:3001` to use the built-in search UI. If you changed `API_PORT`, use that port instead.
 
-The indexer runs automatically, not as a separate one-shot job. Without saved scheduler state, it starts a full index build; subsequent runs use the persisted timestamps. Wait for `Full re-index complete` in the logs before expecting the first full set of results. On the first boot, health requests may fail briefly while MeiliSearch starts; `/health` checks connectivity, **not indexing completion**. An empty result set can also mean the configured relays contain no matching videos.
+The indexer runs automatically, not as a separate one-shot job. A fresh, empty instance starts a full index build; an existing populated index remains searchable immediately and is adopted even if scheduler state is absent. Existing state controls the normal schedules. On the first boot, health requests may fail briefly while MeiliSearch starts; `/health` checks connectivity, **not indexing completion**. An empty result set can also mean the configured relays contain no matching videos.
 
 Default background intervals are 10 minutes for incremental updates and media checks, 24 hours for full rebuilds, and 6 hours for playlist scoring. The scheduler checks due work once per minute and runs jobs serially. See [How it works](./search-engine) and [Configuration](./configuration).
 
 ## Run the source locally
 
-Use Node.js 24 (matching the application Dockerfile) and npm. From the repository root:
+Use Rust 1.99 or newer (matching the application Dockerfile). Node.js is only needed for the separate documentation site. From the repository root:
 
 ```bash
 cp .env.example .env
 # Set a strong MEILI_MASTER_KEY in .env before starting MeiliSearch.
 docker compose up -d meilisearch
-npm ci
+cargo fetch --locked
 ```
 
 Add the host-side MeiliSearch URL to `.env`:
@@ -74,16 +74,16 @@ If you changed `MEILI_PORT`, adjust the URL. Stop the containerized API first if
 
 ```bash
 docker compose stop api
-npm start
+cargo run --release --locked
 ```
 
-`npm start` loads `.env` before importing the API and starts both API and indexer. Unlike Compose, the source process requires `MEILI_URL` explicitly and only enables trust lookups when `FETCH_TRUST_SCORES=true`. Local caches and scheduler state live in the working directory by default, not in the Compose cache volume.
+The Rust executable loads `.env` and starts both API and indexer. Unlike Compose, the source process requires `MEILI_URL` explicitly and only enables trust lookups when `FETCH_TRUST_SCORES=true`. Existing MeiliSearch indexes are reused immediately; no migration re-index is needed. Local caches and scheduler state use the same JSON formats and paths as the former Node.js process.
 
 To verify application changes with the existing checks:
 
 ```bash
-npm test
-npx tsc --project tsconfig.json
+cargo test --locked --all-targets
+cargo build --release --locked --bins
 ```
 
 ## Work on this documentation

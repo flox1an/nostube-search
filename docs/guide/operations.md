@@ -44,7 +44,7 @@ The scheduler inside the `api` process checks every 60 seconds whether work is d
 | Media availability check | 10 min | `MEDIA_AVAILABILITY_CHECK_INTERVAL_MS`, after the first full index exists |
 | Playlist score pass | 6 h | `PLAYLIST_SCORE_INTERVAL_MS` (also runs inline after each full re-index) |
 
-Last-run timestamps persist in `.indexer-state.json` (the `api_cache` volume inside Compose). With no state file, startup runs a full re-index first.
+Last-run timestamps persist in `.indexer-state.json` (the `api_cache` volume inside Compose). With no state file and an empty video index, startup runs a full re-index first. A populated index is adopted without a migration crawl.
 
 ### Forcing a full re-index
 
@@ -75,6 +75,20 @@ docker compose up -d
 docker compose logs -f api   # watch the first scheduler cycle
 ```
 
+### Upgrading from Node.js to Rust
+
+The Rust API container is a drop-in replacement. Keep the existing MeiliSearch **v1.19** service and database unchanged, including any host bind mount such as `./data/meilisearch:/meili_data`. Preserve the `api_cache` volume and all existing cache/state environment paths. Do **not** delete volumes, change the Compose project name, import a dump, or set `FORCE_FULL_REINDEX=true` for this upgrade.
+
+```bash
+docker compose pull api
+docker compose up -d --no-deps api
+curl --fail http://localhost:3001/health
+curl --fail --get http://localhost:3001/api/search --data-urlencode 'q=nostr'
+```
+
+Search uses the existing `videos` and `terms` documents immediately. Existing JSON profile/trust/Blossom caches and millisecond scheduler timestamps are read directly. If only the database survives and scheduler state is missing, the Rust indexer adopts the nonempty index rather than forcing a full crawl. Normal scheduled incremental updates and later full rebuilds still run at their configured intervals.
+
+
 ## Data and persistence
 
 Two named Docker volumes hold all persistent state:
@@ -82,7 +96,7 @@ Two named Docker volumes hold all persistent state:
 | Volume | Content | Disposable? |
 | --- | --- | --- |
 | `meilisearch_data` | MeiliSearch indices: `videos`, `terms`, `people` and `media_availability` | **No.** Video/term documents can be rebuilt from relays, but local availability history cannot. Losing this volume while retaining recent scheduler state does not force an immediate full rebuild. |
-| `api_cache` | Scheduler state, profile/trust/Blossom caches, availability lock file | Mostly. Deleting it costs a full re-index (lost scheduler state), re-fetched profiles, and re-run trust/Blossom lookups. The `media_availability` index survives in `meilisearch_data`. |
+| `api_cache` | Scheduler state, profile/trust/Blossom caches, availability lock file | Mostly. Deleting it loses scheduling history and requires profile/trust/Blossom lookups again. A populated video index is adopted rather than forcibly rebuilt. The `media_availability` index survives in `meilisearch_data`. |
 
 ### Cold backup
 
@@ -144,14 +158,14 @@ The existing Docker workflow builds pull requests without publishing. Pushes to 
 
 | Area | File |
 | --- | --- |
-| Scheduler, full/incremental rebuilds, rolling swap | `src/indexer/index.ts` |
-| Relay fetching and pagination | `src/indexer/relay-source.ts` |
-| Metadata parsing and document building | `src/indexer/index.ts` (`toSearchDocument`) |
-| Media availability checker | `src/indexer/availability-checker.ts`, `src/indexer/media-availability.ts` |
-| Trust score client | `src/indexer/relatr.ts` |
-| HTTP API routes | `src/api/server.ts` |
-| Safety presets and NSFW filtering | `src/api/preset-safety.ts` |
-| Recommendations | `src/api/recommendations.ts` |
-| Sitemap | `src/api/sitemap.ts` |
-| Rate limiting | `src/api/rate-limit.ts` |
-| Blocked authors | `src/api/blocked-authors.ts` |
+| Scheduler, full/incremental rebuilds, rolling swap | `src/indexer.rs` |
+| Relay fetching and pagination | `src/net.rs`, `src/indexer.rs` |
+| Metadata parsing and document building | `src/domain.rs` (`event_to_document`) |
+| Media availability checker | `src/media.rs` |
+| Trust score client | `src/relatr.rs` |
+| HTTP API routes | `src/server.rs` |
+| Safety presets and NSFW filtering | `src/safety.rs` |
+| Recommendations | `src/recommendations.rs` |
+| Sitemap | `src/sitemap.rs` |
+| Rate limiting | `src/rate_limit.rs` |
+| Blocked authors | `src/domain.rs` |
